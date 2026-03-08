@@ -8,3 +8,4 @@ backend/chroma_db/
 *.sqlite
 *.pdf
 .DS_Store
+scripts/
