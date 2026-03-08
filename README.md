@@ -34,7 +34,7 @@ open http://localhost:3000
 # Scarica documentazione ufficiale HA
 bash scripts/download_ha_docs.sh
 
-# Indicizza
+# Indicizza (repo scaricata e depurata da "rumore")
 docker exec rag-backend python ingest.py \
   --folder /app/data/ha_docs/ha_docs_clean \
   --chunk-size 1200 --chunk-overlap 300
@@ -52,7 +52,7 @@ docker exec rag-backend python ingest.py \
 |-----------|---------|-------------|
 | `LLAMA_MODEL` | `llama3.1:8b` | Modello Ollama da usare |
 | `HA_TOKEN` | — | Long-lived token di Home Assistant |
-| `HA_HOST` | — | URL di Home Assistant (es: `http://192.168.1.15:8123`) |
+| `HA_HOST` | — | URL di Home Assistant (es: `http://192.168.1.1:8123`) |
 | `ENABLE_WEB_SEARCH` | `false` | Abilita ricerca web (DuckDuckGo) |
 | `TRANSLATE_QUERY` | `false` | Traduce query in inglese prima del retrieval |
 
