@@ -1,0 +1,10 @@
+.env
+*.pyc
+__pycache__/
+data/
+backend/chroma_db/
+*.log
+*.db
+*.sqlite
+*.pdf
+.DS_Store

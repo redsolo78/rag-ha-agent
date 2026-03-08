@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HA Assistant</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0c0c14;
+      --surface: #12121e;
+      --border:  #1e1e32;
+      --accent:  #7c6af7;
+      --accent2: #e85d75;
+      --text:    #d4d4f0;
+      --muted:   #4a4a6a;
+      --green:   #4ade80;
+      --yellow:  #fbbf24;
+      --red:     #f87171;
+    }
+
+    body {
+      font-family: 'Syne', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 12px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .logo {
+      width: 34px; height: 34px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; flex-shrink: 0;
+    }
+    .header-info h1 { font-size: 0.9rem; font-weight: 600; color: #fff; }
+    .header-info p  { font-size: 0.62rem; color: var(--muted); font-family: 'JetBrains Mono', monospace; margin-top: 2px; }
+
+    .status-bar { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+    .status-item {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 0.62rem; font-family: 'JetBrains Mono', monospace; color: var(--muted);
+      cursor: default;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: all 0.3s; }
+    .dot.ok    { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot.error { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+    .dot.warn  { background: var(--yellow); }
+    .dot.loading { background: var(--yellow); animation: pulse 1s infinite; }
+
+
+    /* ── Tabs ── */
+    .tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+    .tab-panel.active { display: flex; }
+    .sidebar-tabs {
+      display: flex; gap: 6px;
+      padding: 12px 14px 4px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 10px;
+    }
+    .sidebar-tab {
+      flex: 1; padding: 7px 4px;
+      background: transparent;
+      border: 1px solid var(--border); border-radius: 6px;
+      color: var(--muted); font-family: 'Syne', sans-serif;
+      font-size: 0.68rem; font-weight: 600; cursor: pointer;
+      transition: all 0.2s; text-align: center;
+    }
+    .sidebar-tab:hover { color: var(--text); border-color: var(--accent); }
+    .sidebar-tab.active {
+      color: var(--accent); border-color: var(--accent);
+      background: #6c5ce720;
+    }
+
+    /* ── Agent chat ── */
+    .agent-steps-bar {
+      display: flex; flex-wrap: wrap; gap: 4px;
+      padding: 6px 0; margin: 2px 0;
+    }
+    .agent-step {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 8px; border-radius: 20px;
+      font-size: 0.65rem; font-family: 'JetBrains Mono', monospace;
+      white-space: nowrap; border: 1px solid;
+    }
+    .agent-step.thinking { color: var(--muted); border-color: var(--border); background: var(--bg); }
+    .agent-step.action   { color: var(--accent); border-color: var(--accent); background: #6c5ce715; }
+    .agent-step.tool     { color: var(--yellow); border-color: var(--yellow); background: #f1c40f15; }
+    .agent-step.final    { color: var(--green);  border-color: var(--green);  background: #4ade8011; }
+    .agent-step.error    { color: var(--red);    border-color: var(--red);    background: #f8717115; }
+    .agent-status {
+      font-size: 0.65rem; font-family: 'JetBrains Mono', monospace;
+      color: var(--muted); padding: 4px 0;
+    }
+
+    @keyframes pulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
+
+    /* ── Main layout ── */
+    .main { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 250px; flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 14px;
+      display: flex; flex-direction: column; gap: 14px;
+      overflow-y: auto;
+    }
+    .sidebar h2 {
+      font-size: 0.62rem; font-family: 'JetBrains Mono', monospace;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em;
+    }
+
+    /* System info box */
+    .sys-info {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .sys-row {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 0.65rem; font-family: 'JetBrains Mono', monospace;
+    }
+    .sys-label { color: var(--muted); }
+    .sys-value { color: var(--accent); font-weight: 500; }
+    .sys-value.ok { color: var(--green); }
+    .sys-value.error { color: var(--red); }
+
+    /* Upload */
+    .upload-zone {
+      border: 1px dashed var(--border); border-radius: 8px;
+      padding: 16px; text-align: center; cursor: pointer;
+      transition: all 0.2s;
+    }
+    .upload-zone:hover, .upload-zone.drag { border-color: var(--accent); background: #7c6af711; }
+    .upload-zone .icon { font-size: 24px; margin-bottom: 6px; }
+    .upload-zone p { font-size: 0.68rem; color: var(--muted); }
+    .upload-zone strong { color: var(--accent); }
+    #file-input { display: none; }
+
+    .upload-btn {
+      width: 100%; padding: 9px;
+      background: var(--accent); color: #fff; border: none; border-radius: 6px;
+      font-family: 'Syne', sans-serif; font-weight: 600; font-size: 0.78rem;
+      cursor: pointer; transition: opacity 0.2s;
+    }
+    .upload-btn:hover:not(:disabled) { opacity: 0.85; }
+    .upload-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .progress-wrap { display: none; }
+    .progress-wrap.show { display: block; }
+    .progress-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 0%; transition: width 0.4s ease; border-radius: 3px; }
+    .progress-pct { font-size: 0.62rem; font-family: 'JetBrains Mono', monospace; color: var(--accent); text-align: right; }
+
+    #upload-status { font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: var(--muted); display: none; }
+
+    /* Pipeline steps */
+    .pipeline-steps { display: flex; flex-direction: column; gap: 5px; }
+    .step {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 10px;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      font-size: 0.62rem; font-family: 'JetBrains Mono', monospace;
+    }
+    .step-icon { font-size: 13px; }
+    .step-label { color: var(--muted); }
+    .step-tech { margin-left: auto; color: var(--accent); font-size: 0.58rem; }
+
+    /* ── Chat ── */
+    .chat-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    .messages {
+      flex: 1; overflow-y: auto; padding: 16px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    .messages::-webkit-scrollbar { width: 3px; }
+    .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .message { animation: slideIn 0.25s ease; }
+    @keyframes slideIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+
+    .msg-header {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 5px; font-size: 0.62rem;
+      font-family: 'JetBrains Mono', monospace; color: var(--muted);
+    }
+    .role { font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+    .role.user { color: var(--accent2); }
+    .role.ai   { color: var(--accent); }
+
+    .msg-bubble {
+      padding: 12px 16px;
+      border-radius: 2px 12px 12px 12px;
+      font-size: 0.83rem; line-height: 1.75;
+      background: var(--surface); border: 1px solid var(--border);
+      white-space: pre-wrap;
+    }
+    .msg-bubble.user {
+      background: transparent;
+      border-left: 2px solid var(--accent2);
+    }
+    .code-block {
+      background: #070b12;
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 6px;
+      margin: 8px 0;
+      overflow: hidden;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .code-lang {
+      display: block;
+      padding: 4px 12px;
+      font-size: 0.58rem;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      border-bottom: 1px solid var(--border);
+      background: #0a0f1a;
+    }
+    .code-block pre {
+      margin: 0;
+      padding: 12px 14px;
+      overflow-x: auto;
+      font-size: 0.78rem;
+      line-height: 1.6;
+      color: #c9d1d9;
+      white-space: pre;
+    }
+    .code-block pre::-webkit-scrollbar { height: 3px; }
+    .code-block pre::-webkit-scrollbar-thumb { background: var(--border); }
+
+    .msg-bubble code {
+      background: #0a0f1a; padding: 2px 6px; border-radius: 3px;
+      font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: var(--accent);
+    }
+
+    /* Chunks */
+    .retrieved-chunks { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+    .chunks-label { font-size: 0.58rem; font-family: 'JetBrains Mono', monospace; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    .chunks-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+    .chunk-pill {
+      padding: 3px 9px; background: #0a0f1a; border: 1px solid var(--border);
+      border-radius: 20px; font-size: 0.6rem; font-family: 'JetBrains Mono', monospace;
+      color: var(--muted); cursor: pointer; transition: all 0.15s;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .chunk-pill:hover { border-color: var(--accent); color: var(--accent); }
+    .chunk-score { color: var(--accent); font-size: 0.85em; }
+    .chunk-detail {
+      display: none; padding: 9px 13px;
+      background: #0a0f1a; border: 1px solid var(--border);
+      border-left: 2px solid var(--accent); border-radius: 0 6px 6px 6px;
+      font-size: 0.68rem; color: var(--muted); font-family: 'JetBrains Mono', monospace;
+      line-height: 1.6;
+    }
+    .chunk-detail.show { display: block; }
+    .chunk-meta { color: var(--accent); margin-bottom: 5px; font-size: 0.62rem; }
+
+    /* Typing */
+    .typing { display: flex; align-items: center; gap: 5px; padding: 12px 16px; }
+    .typing span {
+      width: 6px; height: 6px; background: var(--accent);
+      border-radius: 50%; animation: bounce 1.2s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: 0.2s; }
+    .typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-6px)} }
+
+    /* ── Input ── */
+    .input-area { padding: 12px 16px 14px; border-top: 1px solid var(--border); background: var(--surface); }
+    .suggestions { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 8px; }
+    .sug-btn {
+      padding: 4px 11px; background: transparent; border: 1px solid var(--border);
+      border-radius: 20px; color: var(--muted); font-size: 0.62rem;
+      font-family: 'Syne', sans-serif; cursor: pointer; transition: all 0.15s;
+    }
+    .sug-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    .input-row { display: flex; gap: 8px; }
+    #question-input, #agent-input {
+      flex: 1; padding: 11px 14px;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); font-family: 'Syne', sans-serif; font-size: 0.83rem;
+      transition: border-color 0.2s; resize: none; height: 44px;
+    }
+    #question-input:focus, #agent-input:focus { outline: none; border-color: var(--accent); }
+
+    .send-btn {
+      padding: 11px 18px;
+      background: linear-gradient(135deg, var(--accent), #5a4fd4);
+      color: #fff; border: none; border-radius: 8px;
+      font-family: 'Syne', sans-serif; font-weight: 600; font-size: 0.78rem;
+      cursor: pointer; transition: opacity 0.2s; white-space: nowrap;
+    }
+    .send-btn:hover:not(:disabled) { opacity: 0.85; }
+    .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .doc-item {
+      padding: 5px 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      margin-bottom: 4px;
+      font-size: 0.6rem;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .doc-item-info { flex: 1; min-width: 0; }
+    .doc-item-name {
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .doc-item-meta { color: var(--muted); margin-top: 2px; }
+    .doc-delete-btn {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.65rem;
+      padding: 2px 5px;
+      transition: all 0.15s;
+      line-height: 1;
+    }
+    .doc-delete-btn:hover {
+      border-color: var(--red);
+      color: var(--red);
+      background: #f8717111;
+    }
+
+    .danger-btn {
+      width: 100%; padding: 7px;
+      background: transparent;
+      border: 1px solid var(--red);
+      border-radius: 6px;
+      color: var(--red);
+      font-family: 'Syne', sans-serif;
+      font-size: 0.72rem; font-weight: 600;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .danger-btn:hover { background: #f8717122; }
+
+    .model-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 7px; background: #0a0f1a; border: 1px solid var(--border);
+      border-radius: 4px; font-size: 0.58rem; font-family: 'JetBrains Mono', monospace;
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">🧠</div>
+  <div class="header-info">
+    <h1>HA Assistant — Completamente Locale</h1>
+    <p id="header-subtitle">Caricamento sistema...</p>
+  </div>
+  <div class="status-bar">
+    <div class="status-item">
+      <div class="dot loading" id="dot-chroma"></div>
+      <span id="label-chroma">ChromaDB</span>
+    </div>
+    <div class="status-item">
+      <div class="dot loading" id="dot-ollama"></div>
+      <span id="label-ollama">Ollama</span>
+    </div>
+  </div>
+</header>
+
+<div class="main">
+  <aside class="sidebar">
+    <div class="sidebar-tabs">
+      <button class="sidebar-tab active" onclick="switchTab('rag')">💬 RAG Chat</button>
+      <button class="sidebar-tab" onclick="switchTab('agent')">🤖 HA Agent</button>
+    </div>
+    <h2>⚙️ Configurazione</h2>
+    <div class="sys-info">
+      <div class="sys-row">
+        <span class="sys-label">🤖 Modello LLM</span>
+        <span class="sys-value" id="info-model">...</span>
+      </div>
+      <div class="sys-row">
+        <span class="sys-label">🔢 Embedding</span>
+        <span class="sys-value" id="info-embed">...</span>
+      </div>
+      <div class="sys-row" title="Numero di documenti indicizzati">
+        <span class="sys-label">📄 Documenti</span>
+        <span class="sys-value" id="info-docs">...</span>
+      </div>
+      <div class="sys-row" title="Numero totale di chunk nel vector DB">
+        <span class="sys-label">🗄️ Chunks totali</span>
+        <span class="sys-value" id="info-chunks">...</span>
+      </div>
+      <div class="sys-row" title="Dimensione stimata dei dati nel DB">
+        <span class="sys-label">💾 Dim. stimata DB</span>
+        <span class="sys-value" id="info-dbsize">...</span>
+      </div>
+      <div class="sys-row" title="Quanti chunk vengono recuperati per ogni domanda">
+        <span class="sys-label">🔍 Retrieval top-K</span>
+        <span class="sys-value" id="info-topk">...</span>
+      </div>
+      <div class="sys-row" title="Dimensione di ogni chunk di testo">
+        <span class="sys-label">✂️ Chunk size</span>
+        <span class="sys-value" id="info-chunksize">...</span>
+      </div>
+    </div>
+
+    <!-- Lista documenti nel DB -->
+    <div id="docs-list" style="display:none; margin-top:4px;">
+      <div style="font-size:0.58rem; font-family:'JetBrains Mono',monospace; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Documenti indicizzati</div>
+      <div id="docs-items"></div>
+    </div>
+
+    <button class="danger-btn" onclick="deleteAllDocuments()">🗑️ Svuota tutto il DB</button>
+
+    <h2>📥 Carica Documento</h2>
+    <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+      <div class="icon">📂</div>
+      <p>Trascina file o 📁 cartella qui<br>o <strong>clicca per scegliere</strong><br><span style="font-size:0.58rem;color:var(--muted)">.pdf · .txt · .md · .markdown</span></p>
+      <input type="file" id="file-input" accept=".pdf,.txt,.md,.markdown">
+    </div>
+    <button class="upload-btn" id="upload-btn" disabled>Carica e Indicizza</button>
+    <button class="upload-btn" id="stop-btn" style="display:none;background:var(--red)">⏹ Interrompi</button>
+    <div class="progress-wrap" id="progress">
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="progress-pct" id="progress-pct">0%</div>
+    </div>
+    <div id="upload-status"></div>
+  </aside>
+
+    <!-- RAG Chat Panel -->
+    <div class="tab-panel active" id="tab-rag">
+    <div class="chat-container">
+    <div class="messages" id="messages">
+      <div class="message">
+        <div class="msg-header"><span class="role ai">Sistema</span></div>
+        <div class="msg-bubble">Benvenuto! 👋
+
+Carico le informazioni del sistema in corso...
+Appena pronto potrai fare le tue domande sui documenti caricati.</div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="suggestions">
+        <button class="sug-btn" onclick="setQuestion(this.textContent)">Cos'è e come si usa questo tool?</button>
+        <button class="sug-btn" onclick="setQuestion(this.textContent)">Mostrami la sintassi con esempi</button>
+        <button class="sug-btn" onclick="setQuestion(this.textContent)">Elenca le opzioni principali</button>
+        <button class="sug-btn" onclick="setQuestion(this.textContent)">Dammi un esempio pratico completo</button>
+      </div>
+      <div class="input-row">
+        <textarea id="question-input" placeholder="Fai una domanda sui tuoi documenti..."></textarea>
+        <button class="send-btn" id="send-btn" onclick="sendQuestion()">Invia ⟶</button>
+      </div>
+    </div>
+  </div>
+  </div><!-- end tab-rag -->
+
+  <!-- HA Agent Panel -->
+  <div class="tab-panel" id="tab-agent">
+    <div class="chat-container">
+      <div class="messages" id="agent-messages">
+        <div class="message">
+          <div class="msg-header"><span class="role ai">🤖 HA Agent</span></div>
+          <div class="msg-bubble">
+            <strong>Sono il tuo assistente specializzato in Home Assistant!</strong><br><br>
+            Posso aiutarti a:<br>
+            🔍 <strong>Analizzare</strong> la tua configurazione YAML<br>
+            🐛 <strong>Diagnosticare</strong> problemi dai log<br>
+            💡 <strong>Suggerire</strong> miglioramenti e automazioni<br>
+            🌐 <strong>Cercare</strong> documentazione e soluzioni online<br>
+            🔧 <strong>Controllare</strong> dispositivi (con la tua conferma)<br><br>
+            <em>Prova: "Analizza la mia configurazione e dimmi se ci sono problemi"</em>
+          </div>
+        </div>
+      </div>
+      <div class="input-area">
+        <div class="suggestions">
+          <button class="sug-btn" onclick="setAgentQuestion(this.textContent)">Analizza la mia configurazione</button>
+          <button class="sug-btn" onclick="setAgentQuestion(this.textContent)">Mostrami gli errori nei log</button>
+          <button class="sug-btn" onclick="setAgentQuestion(this.textContent)">Quanti dispositivi ho attivi?</button>
+          <button class="sug-btn" onclick="setAgentQuestion(this.textContent)">Suggeriscimi delle automazioni utili</button>
+        </div>
+        <div class="input-row">
+          <textarea id="agent-input" placeholder="Chiedi all'agente HA..."></textarea>
+          <button class="send-btn" id="agent-send-btn" onclick="sendAgentMessage()">Invia ⟶</button>
+        </div>
+      </div>
+    </div>
+  </div><!-- end tab-agent -->
+
+</div><!-- end main -->
+
+<script>
+  // ── Configurazione dinamica (letta dal backend) ──────────────
+  const API = "/api";
+  let systemConfig = {
+    model: "...",
+    topK: 10,
+    embed: "...",
+    chunks: 0
+  };
+
+  // ── Health check + carica config dal backend ─────────────────
+  async function loadSystemInfo() {
+    try {
+      const r = await fetch(`${API}/health`);
+      const data = await r.json();
+
+      // Aggiorna ChromaDB status
+      const chromaOk = data.chromadb?.startsWith("ok");
+      document.getElementById("dot-chroma").className = "dot " + (chromaOk ? "ok" : "error");
+
+      // Estrai chunks count dal messaggio "ok (3128 chunks)"
+      const chunksMatch = data.chromadb?.match(/\((\d+) chunks\)/);
+      if (chunksMatch) {
+        systemConfig.chunks = parseInt(chunksMatch[1]);
+        document.getElementById("info-chunks").textContent = parseInt(chunksMatch[1]).toLocaleString();
+        document.getElementById("info-chunks").className = "sys-value ok";
+      }
+      document.getElementById("label-chroma").textContent = chromaOk
+        ? `ChromaDB ✓` : "ChromaDB ✗";
+
+      // Aggiorna Ollama status
+      const ollamaOk = data.ollama?.startsWith("ok");
+      document.getElementById("dot-ollama").className = "dot " + (ollamaOk ? "ok" : "error");
+      document.getElementById("label-ollama").textContent = ollamaOk
+        ? "Ollama ✓" : "Ollama ✗";
+
+      // Estrai nome modello dal messaggio "ok (modello 'mistral' pronto)"
+      const modelMatch = data.ollama?.match(/modello '(.+?)'/);
+      if (modelMatch) {
+        systemConfig.model = modelMatch[1];
+        document.getElementById("info-model").textContent = modelMatch[1];
+        document.getElementById("info-model").className = "sys-value ok";
+        
+      }
+
+    } catch (e) {
+      document.getElementById("dot-chroma").className = "dot error";
+      document.getElementById("dot-ollama").className = "dot error";
+    }
+
+    // Carica config
+    try {
+      const r2 = await fetch(`${API}/config`);
+      if (r2.ok) {
+        const cfg = await r2.json();
+        systemConfig.topK  = cfg.top_k;
+        systemConfig.embed = cfg.embed_model;
+        document.getElementById("info-topk").textContent      = cfg.top_k;
+        document.getElementById("info-embed").textContent     = cfg.embed_model.split("/").pop();
+        document.getElementById("info-chunksize").textContent = cfg.chunk_size + " car.";
+        document.getElementById("header-subtitle").textContent =
+          `${cfg.llm_model} · chromadb · ${cfg.embed_model.split("/").pop()} · fastapi`;
+      }
+    } catch(e) {
+      document.getElementById("info-topk").textContent = systemConfig.topK;
+    }
+
+    // Carica statistiche DB
+    try {
+      const r3 = await fetch(`${API}/stats`);
+      if (r3.ok) {
+        const stats = await r3.json();
+        // Conta i tipi di documento
+    const exts = (stats.documents || []).map(d => {
+      const name = d.name || "";
+      if (name.endsWith(".md") || name.endsWith(".markdown")) return "md";
+      if (name.endsWith(".txt")) return "txt";
+      return "pdf";
+    });
+    const counts = exts.reduce((a, e) => { a[e] = (a[e]||0)+1; return a; }, {});
+    const label = Object.entries(counts).map(([k,v]) => v+" "+k.toUpperCase()).join(", ") || stats.total_documents+" doc";
+    document.getElementById("info-docs").textContent = label;
+        document.getElementById("info-docs").className     = "sys-value ok";
+        document.getElementById("info-chunks").textContent = stats.total_chunks.toLocaleString();
+        document.getElementById("info-chunks").className   = "sys-value ok";
+        document.getElementById("info-dbsize").textContent = stats.estimated_size_mb + " MB";
+        document.getElementById("info-dbsize").className   = "sys-value ok";
+
+        const docsList  = document.getElementById("docs-list");
+        const docsItems = document.getElementById("docs-items");
+        docsItems.innerHTML = ""; // svuota sempre prima di ridisegnare
+
+        if (stats.documents && stats.documents.length > 0) {
+          docsList.style.display = "block";
+          const topDocs = stats.documents.sort((a,b) => b.chunks - a.chunks).slice(0,5);
+          docsItems.innerHTML = topDocs.map(d => `
+            <div class="doc-item">
+              <div class="doc-item-info">
+                <div class="doc-item-name" title="${d.name}">${d.name}</div>
+                <div class="doc-item-meta">${d.chunks.toLocaleString()} chunks · ${d.pages} pag.</div>
+              </div>
+              <button class="doc-delete-btn" onclick="deleteDocument('${d.name}')" title="Elimina documento">🗑️</button>
+            </div>
+          `).join("") + (stats.documents.length > 5
+            ? `<div style="font-size:0.58rem;color:var(--muted);font-family:'JetBrains Mono',monospace;padding:3px 8px;">
+                + altri ${stats.documents.length - 5} documenti...
+               </div>` : "");
+        }
+      }
+    } catch(e) { /* stats non disponibili */ }
+  }
+
+  loadSystemInfo();
+  setInterval(loadSystemInfo, 15000); // aggiorna ogni 15s
+
+  // ── Upload PDF ───────────────────────────────────────────────
+  const fileInput   = document.getElementById("file-input");
+  const uploadZone  = document.getElementById("upload-zone");
+  const uploadBtn   = document.getElementById("upload-btn");
+  let selectedFile  = null;
+  let selectedFiles = null; // per upload multiplo da cartella
+  let abortUpload   = false;
+
+  // ── Response time estimator ───────────────────────────────────
+  const perf = {
+    samples: JSON.parse(localStorage.getItem("ha_perf") || "[]"),
+    avgTokensPerSec() {
+      if (!this.samples.length) return 12; // default: 12 tok/s
+      return this.samples.reduce((a,b) => a+b, 0) / this.samples.length;
+    },
+    record(tokens, seconds) {
+      if (tokens > 0 && seconds > 0) {
+        this.samples.push(tokens / seconds);
+        if (this.samples.length > 20) this.samples.shift(); // ultimi 20
+        localStorage.setItem("ha_perf", JSON.stringify(this.samples));
+      }
+    },
+    estimate(promptLen, queryType) {
+      // Stima output tokens in base al tipo di domanda
+      const outputTokens = queryType === "analysis" ? 600
+                         : queryType === "simple"   ? 200
+                         : 400;
+      // Tool overhead: ~2s per tool call
+      const toolTime = queryType === "analysis" ? 6 : 2;
+      const genTime  = outputTokens / this.avgTokensPerSec();
+      return Math.round(genTime + toolTime);
+    }
+  };
+
+  fileInput.addEventListener("change", e => {
+    selectedFile = e.target.files[0];
+    if (selectedFile) {
+      const icon = (selectedFile.name.endsWith(".md") || selectedFile.name.endsWith(".markdown")) ? "📝" : selectedFile.name.endsWith(".txt") ? "📃" : "📄";
+      uploadZone.querySelector("p").innerHTML =
+        `${icon} <strong>${selectedFile.name}</strong><br><span style="font-size:0.62rem">Pronto per l'upload</span>`;
+      uploadBtn.disabled = false;
+    }
+  });
+
+  uploadZone.addEventListener("dragover",  e => { e.preventDefault(); uploadZone.classList.add("drag"); });
+  uploadZone.addEventListener("dragleave", () => uploadZone.classList.remove("drag"));
+  const VALID_EXTS = [".pdf", ".txt", ".md", ".markdown"];
+
+  function fileIcon(name) {
+    if (name.endsWith(".md") || name.endsWith(".markdown")) return "📝";
+    if (name.endsWith(".txt")) return "📃";
+    return "📄";
+  }
+
+  async function readAllFiles(entry) {
+    return new Promise((resolve) => {
+      if (entry.isFile) {
+        entry.file(f => {
+          const valid = VALID_EXTS.some(ext => f.name.toLowerCase().endsWith(ext));
+          resolve(valid ? [f] : []);
+        });
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const results = [];
+        const readBatch = () => {
+          reader.readEntries(async (entries) => {
+            if (entries.length === 0) { resolve(results); return; }
+            for (const e of entries) {
+              const files = await readAllFiles(e);
+              results.push(...files);
+            }
+            readBatch();
+          });
+        };
+        readBatch();
+      } else {
+        resolve([]);
+      }
+    });
+  }
+
+  uploadZone.addEventListener("drop", async e => {
+    e.preventDefault(); uploadZone.classList.remove("drag");
+
+    const items = [...(e.dataTransfer.items || [])];
+    let allFiles = [];
+
+    for (const item of items) {
+      const entry = item.webkitGetAsEntry?.();
+      if (entry) {
+        const files = await readAllFiles(entry);
+        allFiles.push(...files);
+      }
+    }
+
+    allFiles = allFiles.filter(f => VALID_EXTS.some(ext => f.name.toLowerCase().endsWith(ext)));
+    if (allFiles.length === 0) return;
+
+    if (allFiles.length === 1) {
+      selectedFile = allFiles[0];
+      selectedFiles = null;
+      uploadZone.querySelector("p").innerHTML =
+        `${fileIcon(allFiles[0].name)} <strong>${allFiles[0].name}</strong><br><span style="font-size:0.62rem">Pronto</span>`;
+    } else {
+      selectedFiles = allFiles;
+      selectedFile  = null;
+      const preview = allFiles.slice(0,3).map(f => f.name).join(", ");
+      uploadZone.querySelector("p").innerHTML =
+        `📁 <strong>${allFiles.length} file selezionati</strong><br>
+         <span style="font-size:0.6rem;color:var(--muted)">${preview}${allFiles.length > 3 ? ` +${allFiles.length-3} altri` : ""}</span>`;
+    }
+    uploadBtn.disabled = false;
+  });
+
+  async function streamUpload(file, onProgress) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const r = await fetch(`${API}/upload-pdf`, { method: "POST", body: formData });
+    if (!r.ok) { const t = await r.text(); throw new Error("HTTP " + r.status + ": " + t.substring(0,80)); }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6).trim();
+        if (raw === "[DONE]") return;
+        try { const evt = JSON.parse(raw); onProgress(evt); } catch(_) {}
+      }
+    }
+  }
+
+  document.getElementById("stop-btn").addEventListener("click", () => {
+    abortUpload = true;
+  });
+
+  uploadBtn.addEventListener("click", async () => {
+    if (!selectedFile && !selectedFiles) return;
+    const progressWrap = document.getElementById("progress");
+    const progressFill = document.getElementById("progress-fill");
+    const progressPct  = document.getElementById("progress-pct");
+    const status       = document.getElementById("upload-status");
+
+    abortUpload = false;
+    uploadBtn.disabled = true;
+    document.getElementById("stop-btn").style.display = "block";
+    progressWrap.classList.add("show");
+    progressFill.style.width = "0%";
+    progressPct.textContent  = "0%";
+    status.style.display = "block";
+    status.style.color   = "var(--muted)";
+
+    const files = selectedFiles ? [...selectedFiles] : [selectedFile];
+    let errors = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      if (abortUpload) break;
+      try {
+        await streamUpload(files[i], evt => {
+          if (evt.type === "progress") {
+            const pct = Math.round((i / files.length) * 100 + (evt.pct / files.length));
+            progressFill.style.width = pct + "%";
+            progressPct.textContent  = pct + "%";
+            status.style.color = "var(--muted)";
+            status.textContent = files.length > 1
+              ? `[${i+1}/${files.length}] ${files[i].name} — ${evt.msg}`
+              : evt.msg;
+          } else if (evt.type === "error") {
+            throw new Error(evt.msg);
+          }
+        });
+      } catch(e) {
+        errors++;
+        status.style.color = "var(--yellow)";
+        status.textContent = `⚠️ Saltato: ${files[i].name}`;
+        await new Promise(r => setTimeout(r, 800));
+      }
+    }
+
+    progressFill.style.width = "100%";
+    progressPct.textContent  = "100%";
+    document.getElementById("stop-btn").style.display = "none";
+    if (abortUpload) {
+      status.style.color = "var(--yellow)";
+      status.textContent = `⏹ Interrotto — ${errors === 0 ? i : i - errors}/${files.length} file indicizzati`;
+    } else if (errors === 0) {
+      status.style.color = "var(--green)";
+      status.textContent = files.length === 1
+        ? `✅ ${files[0].name} indicizzato`
+        : `✅ ${files.length} file indicizzati`;
+    } else {
+      status.style.color = "var(--yellow)";
+      status.textContent = `⚠️ ${files.length-errors}/${files.length} indicizzati, ${errors} errori`;
+    }
+    loadSystemInfo();
+    progressWrap.classList.remove("show");
+    uploadBtn.disabled = false;
+    abortUpload = false;
+    selectedFile = null; selectedFiles = null;
+  });
+
+  // ── Chat ─────────────────────────────────────────────────────
+  document.getElementById("question-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendQuestion(); }
+  });
+
+  function setQuestion(text) {
+    document.getElementById("question-input").value = text;
+    document.getElementById("question-input").focus();
+  }
+
+  function formatText(text) {
+    // 1. Blocchi ```lang ... ``` → <pre><code>
+    text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+      const label = lang ? `<span class="code-lang">${lang}</span>` : "";
+      return `<div class="code-block">${label}<pre><code>${escHtml(code.trim())}</code></pre></div>`;
+    });
+    // 2. Bold **testo**
+    text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    // 3. Inline `code`
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // 4. Newline → <br>
+    text = text.replace(/\n/g, '<br>');
+    return text;
+  }
+
+  function escHtml(str) {
+    return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  function addMessage(role, content, chunks = [], modelName = "") {
+    const msgs = document.getElementById("messages");
+    const div  = document.createElement("div");
+    div.className = "message";
+
+    const roleLabel = role === "user"
+      ? "Tu"
+      : `🤖 ${modelName || systemConfig.model}`;
+
+    const chunksBadge = chunks.length
+      ? `<span class="model-badge">📎 ${chunks.length} chunks</span>` : "";
+
+    div.innerHTML = `
+      <div class="msg-header">
+        <span class="role ${role}">${roleLabel}</span>
+        <span>${new Date().toLocaleTimeString('it-IT')}</span>
+        ${chunksBadge}
+      </div>
+      <div class="msg-bubble ${role}">${formatText(content)}</div>
+      ${chunks.length ? renderChunks(chunks) : ""}
+    `;
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function renderChunks(chunks) {
+    const pills = chunks.map((c, i) => `
+      <div class="chunk-pill" onclick="toggleChunk(this, 'cd-${Date.now()}-${i}')">
+        📄 pag. ${c.page}
+        <span class="chunk-score">${(c.score * 100).toFixed(0)}%</span>
+      </div>
+      <div class="chunk-detail" id="cd-${Date.now()}-${i}">
+        <div class="chunk-meta">Pagina ${c.page} · Rilevanza ${(c.score*100).toFixed(1)}%</div>
+        ${c.text.substring(0, 350)}...
+      </div>
+    `).join("");
+
+    return `
+      <div class="retrieved-chunks">
+        <div class="chunks-label">Chunks recuperati</div>
+        <div class="chunks-pills">${pills}</div>
+      </div>
+    `;
+  }
+
+  function toggleChunk(pill, id) {
+    // Trova il chunk-detail subito dopo il pill
+    let el = pill.nextElementSibling;
+    while (el && !el.classList.contains("chunk-detail")) el = el.nextElementSibling;
+    if (el) el.classList.toggle("show");
+  }
+
+  function addTyping() {
+    const msgs = document.getElementById("messages");
+    const div  = document.createElement("div");
+    div.id = "typing-indicator";
+    div.className = "message";
+    div.innerHTML = `
+      <div class="msg-header">
+        <span class="role ai">🤖 ${systemConfig.model}</span>
+        <span>elaborazione...</span>
+      </div>
+      <div class="msg-bubble" style="padding:0">
+        <div class="typing"><span></span><span></span><span></span></div>
+      </div>
+    `;
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  async function deleteAllDocuments() {
+    const total = document.getElementById("info-chunks")?.textContent || "tutti i";
+    if (!confirm(`⚠️ Eliminare ${total} chunks da ChromaDB?\nQuesta azione non può essere annullata.`)) return;
+
+    try {
+      const r = await fetch(`${API}/documents/all`, { method: "DELETE" });
+      const data = await r.json();
+      if (r.ok) {
+        addMessage("ai", `🗑️ Database svuotato — ${data.chunks_deleted} chunks eliminati.`);
+        loadSystemInfo();
+      } else {
+        alert("Errore: " + data.detail);
+      }
+    } catch(e) {
+      alert("Errore connessione: " + e.message);
+    }
+  }
+
+  async function deleteDocument(docName) {
+    if (!confirm(`Eliminare "${docName}" e tutti i suoi chunk dal DB?`)) return;
+
+    try {
+      const r = await fetch(`${API}/document/${encodeURIComponent(docName)}`, {
+        method: "DELETE"
+      });
+      const data = await r.json();
+
+      if (r.ok) {
+        // Mostra messaggio nel chat
+        addMessage("ai", `🗑️ Documento eliminato: **${docName}**\n${data.chunks_deleted} chunks rimossi dal DB.`);
+        loadSystemInfo(); // aggiorna stats sidebar
+      } else {
+        alert("Errore: " + data.detail);
+      }
+    } catch(e) {
+      alert("Errore connessione: " + e.message);
+    }
+  }
+
+  async function sendQuestion() {
+    const input    = document.getElementById("question-input");
+    const sendBtn  = document.getElementById("send-btn");
+    const question = input.value.trim();
+    if (!question) return;
+
+    input.value = "";
+    sendBtn.disabled = true;
+    addMessage("user", question);
+    addTyping();
+
+    try {
+      const r = await fetch(`${API}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, top_k: systemConfig.topK })
+      });
+
+      document.getElementById("typing-indicator")?.remove();
+
+      if (!r.ok) {
+        const err = await r.json();
+        addMessage("ai", `❌ Errore: ${err.detail}`);
+      } else {
+        const data = await r.json();
+        // Aggiorna il modello in uso se diverso
+        if (data.model) systemConfig.model = data.model;
+        addMessage("ai", data.answer, data.chunks, data.model);
+      }
+    } catch(e) {
+      document.getElementById("typing-indicator")?.remove();
+      addMessage("ai", "❌ Impossibile contattare il server. Il backend è avviato?");
+    }
+
+    sendBtn.disabled = false;
+    input.focus();
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────
+  function switchTab(tab) {
+    document.querySelectorAll(".sidebar-tab").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    document.querySelector(`.sidebar-tab[onclick="switchTab('${tab}')"]`).classList.add("active");
+    document.getElementById(`tab-${tab}`).classList.add("active");
+  }
+
+  // ── Agent ─────────────────────────────────────────────────────
+  const AGENT_API = window.location.origin;
+
+  function setAgentQuestion(text) {
+    const input = document.getElementById("agent-input");
+    input.value = text;
+    input.focus();
+    sendAgentMessage();
+  }
+
+  document.getElementById("agent-input").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAgentMessage(); }
+  });
+
+  function addAgentMessage(role, content) {
+    const msgs = document.getElementById("agent-messages");
+    const div  = document.createElement("div");
+    div.className = "message";
+    const roleLabel = role === "user" ? "Tu" : "🤖 HA Agent";
+    const roleClass = role === "user" ? "user" : "ai";
+    div.innerHTML = `
+      <div class="msg-header">
+        <span class="role ${roleClass}">${roleLabel}</span>
+        <span>${new Date().toLocaleTimeString('it-IT')}</span>
+      </div>
+      <div class="msg-bubble ${role}">${formatText(content)}</div>
+    `;
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    return div;
+  }
+
+  let _stepsBar = null;
+
+  function addAgentStep(type, msg) {
+    const msgs = document.getElementById("agent-messages");
+    // Crea o riusa la barra degli step
+    if (!_stepsBar || type === "thinking") {
+      _stepsBar = document.createElement("div");
+      _stepsBar.className = "agent-steps-bar";
+      msgs.appendChild(_stepsBar);
+    }
+    const div = document.createElement("span");
+    div.className = `agent-step ${type}`;
+    div.textContent = msg;
+    _stepsBar.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    return div;
+  }
+
+  let agentThinkingDiv = null;
+
+  async function sendAgentMessage() {
+    const input   = document.getElementById("agent-input");
+    const sendBtn = document.getElementById("agent-send-btn");
+    const message = input.value.trim();
+    if (!message) return;
+
+    input.value = "";
+    sendBtn.disabled = true;
+    addAgentMessage("user", message);
+
+    // Classifica query e stima tempo
+    const _qLower = message.toLowerCase();
+    const _qType  = (_qLower.includes("analizza") || _qLower.includes("configur") || _qLower.includes("problemi") || _qLower.includes("log"))
+                    ? "analysis" : (_qLower.length < 40 ? "simple" : "medium");
+    const _estSec = perf.estimate(message.length, _qType);
+    const _t0     = Date.now();
+    let   _tokenCount = 0;
+
+    // Placeholder pensiero
+    agentThinkingDiv = addAgentStep("thinking", `🤔 Elaborazione in corso... (stima: ~${_estSec}s)`);
+
+    try {
+      const r = await fetch(`${AGENT_API}/agent/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message })
+      });
+
+      if (!r.ok) throw new Error("HTTP " + r.status);
+
+      const reader  = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let finalAnswerDiv = null;
+      let stepDivs = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n"); buf = lines.pop();
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if (raw === "[DONE]") break;
+          try {
+            const evt = JSON.parse(raw);
+
+            if (evt.type === "thinking") {
+              if (agentThinkingDiv) agentThinkingDiv.textContent = evt.msg;
+
+            } else if (evt.type === "action") {
+              if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
+              const d = addAgentStep("action", `🔧 ${evt.msg} → input: ${evt.input}`);
+              stepDivs.push(d);
+
+            } else if (evt.type === "tool_start") {
+              const d = addAgentStep("tool", `⏳ ${evt.msg}`);
+              stepDivs.push(d);
+
+            } else if (evt.type === "tool_end") {
+              // aggiorna l'ultimo step
+              if (stepDivs.length > 0) {
+                stepDivs[stepDivs.length-1].textContent = `✅ Risultato: ${evt.preview}`;
+              }
+
+            } else if (evt.type === "stream_start") {
+              if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
+              stepDivs.forEach(d => d.remove()); stepDivs = [];
+              _stepsBar = null;
+              const msgs = document.getElementById("agent-messages");
+              const div  = document.createElement("div");
+              div.className = "message";
+              const bubble = document.createElement("div");
+              bubble.className = "msg-bubble ai";
+              bubble._raw = "";
+              div.innerHTML = `<div class="msg-header"><span class="role ai">🤖 HA Agent</span><span>${new Date().toLocaleTimeString('it-IT')}</span></div>`;
+              div.appendChild(bubble);
+              msgs.appendChild(div);
+              msgs.scrollTop = msgs.scrollHeight;
+              finalAnswerDiv = bubble;
+
+            } else if (evt.type === "stream_token") {
+              _tokenCount++;
+              if (finalAnswerDiv) {
+                finalAnswerDiv._raw += evt.token;
+                finalAnswerDiv.textContent = finalAnswerDiv._raw;
+                document.getElementById("agent-messages").scrollTop = 99999;
+              }
+
+            } else if (evt.type === "stream_end") {
+              if (finalAnswerDiv) {
+                finalAnswerDiv.innerHTML = formatText(finalAnswerDiv._raw);
+                const elapsed = (Date.now() - _t0) / 1000;
+                perf.record(_tokenCount, elapsed);
+                const tokSec = (_tokenCount / elapsed).toFixed(1);
+                const timer  = document.createElement("div");
+                timer.style.cssText = "font-size:0.6rem;color:var(--muted);margin-top:6px;text-align:right";
+                timer.textContent   = `⏱ ${elapsed.toFixed(1)}s · ${tokSec} tok/s · stima era ~${_estSec}s`;
+                finalAnswerDiv.parentElement.appendChild(timer);
+              }
+              finalAnswerDiv = null;
+
+            } else if (evt.type === "final") {
+              if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
+              stepDivs.forEach(d => d.remove()); stepDivs = [];
+              addAgentMessage("ai", evt.answer);
+
+            } else if (evt.type === "error") {
+              if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
+              addAgentStep("error", evt.msg);
+            }
+          } catch(_) {}
+        }
+      }
+
+    } catch(e) {
+      if (agentThinkingDiv) agentThinkingDiv.remove();
+      addAgentStep("error", "❌ Errore connessione: " + e.message);
+    }
+
+    sendBtn.disabled = false;
+    input.focus();
+  }
+
+</script>
+</body>
+</html>

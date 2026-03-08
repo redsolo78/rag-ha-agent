@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+langchain==0.3.7
+langchain-community==0.3.7
+langchain-ollama==0.2.1
+chromadb==0.5.23
+sentence-transformers==3.3.1
+duckduckgo-search==6.3.7
+requests==2.32.3
+pyyaml==6.0.2
+python-multipart==0.0.12
