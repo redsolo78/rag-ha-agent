@@ -101,6 +101,8 @@ services:
       context: ./agent
       dockerfile: Dockerfile
     container_name: rag-ha-agent
+    env_file:
+      - .env
     restart: unless-stopped
     ports:
       - "8100:8100"
@@ -113,7 +115,7 @@ services:
       - LLAMA_MODEL=${LLAMA_MODEL:-llama3.1:8b}
       - EMBED_MODEL=${EMBED_MODEL:-all-MiniLM-L6-v2}
       - HA_HOST=${HA_HOST}
-      - HA_TOKEN=${HA_TOKEN}
+#      - HA_TOKEN=${HA_TOKEN}
       - HA_CONFIG_PATH=/ha_config
       - TOP_K=${AGENT_TOP_K:-8}
       - ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-false}
@@ -121,7 +123,7 @@ services:
       - ACTION_CONFIRM_TOKEN=${ACTION_CONFIRM_TOKEN:-change-me}
       - MAX_CONFIG_CHARS=${MAX_CONFIG_CHARS:-7000}
       - MAX_EXTRA_CHARS=${MAX_EXTRA_CHARS:-4000}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://192.168.1.15:3000}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
