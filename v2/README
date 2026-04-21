@@ -87,15 +87,6 @@ Usa la v2 quando vuoi:
 - introdurre azioni controllate su HA
 - separare bene sperimentazione e baseline stabile
 
-## Quando non sostituire subito la v1
-
-Non conviene sostituire immediatamente la v1 se ti serve:
-
-- stabilità assoluta su un setup già funzionante
-- poco tempo per regressioni e test
-- una demo semplice e già collaudata
-
-In quel caso, la v2 va trattata come branch architetturale “pronto da testare”.
 
 ## Configurazione
 
@@ -130,17 +121,3 @@ docker compose up -d --build
 4. Testare il backend `/health` e l'agent `/agent/health`.
 5. Fare query che richiedono correlazione tra config e stato reale.
 
-## Suggerimento strategico
-
-La scelta di creare `v2/` invece di una nuova repository è corretta perché:
-
-- evita frammentazione
-- mantiene la storia del progetto in un unico posto
-- consente confronto diretto v1/v2
-- permette una promozione graduale della v2 nella root solo quando sarà davvero pronta
-
-## Cosa c'è già implementato qui
-
-I file presenti in `v2/` sono **commentati** e scritti per essere leggibili anche in ottica di presentazione tecnica interna.
-
-Sono pensati come base concreta, non come semplice mockup.
