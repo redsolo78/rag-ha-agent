@@ -1,0 +1,146 @@
+# RAG HA Agent — Versione 2.0
+
+La cartella `v2/` contiene una proposta di evoluzione **non distruttiva** della versione 1.0.
+
+L'idea è mantenere la repository unica e aggiungere una directory autonoma per sperimentare, validare e poi eventualmente promuovere la nuova architettura nella root del progetto.
+
+## Obiettivi della v2.0
+
+La v2 introduce quattro miglioramenti sostanziali:
+
+1. **Indicizzazione automatica della configurazione di Home Assistant** in una collection dedicata.
+2. **Retrieval multi-sorgente** separando documentazione generica e configurazione reale dell'istanza.
+3. **Reranking leggero e deduplica** per migliorare la qualità dei chunk passati al modello.
+4. **Flusso operativo controllato** nell'agent: propose → confirm → execute.
+
+## Struttura della v2
+
+```text
+v2/
+├── README.md
+├── .env.example
+├── docker-compose.yml
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── api.py
+│   └── ingest_ha_config.py
+└── agent/
+    ├── Dockerfile
+    ├── requirements.txt
+    └── agent_api.py
+```
+
+## Idee architetturali principali
+
+### 1. Collection separate in Chroma
+
+La v1 usa una collection documentale unica.  
+La v2 usa:
+
+- `documents` → documentazione generica e PDF
+- `ha_config` → file YAML / JSON / TXT della configurazione di Home Assistant
+
+Questo riduce il rumore e migliora il grounding.
+
+### 2. Indicizzazione della config locale
+
+La v2 introduce uno script dedicato che:
+
+- scansiona la cartella montata `/ha_config`
+- esclude directory rumorose o troppo grandi
+- chunka i file testuali in modo prevedibile
+- salva i chunk in Chroma con metadata più ricchi
+
+### 3. Retrieval multi-source
+
+Il backend v2 recupera chunk da più collection:
+
+- documenti generici
+- configurazione HA
+
+Poi:
+
+- calcola uno score semplice ma consistente
+- deduplica i risultati
+- costruisce un contesto più utile
+
+### 4. Azioni HA più sicure
+
+L'agent v2 non esegue subito i servizi HA.
+
+Il flusso previsto è:
+
+```text
+Utente chiede azione
+→ agent produce una proposta strutturata
+→ utente conferma con token
+→ agent esegue il servizio
+```
+
+## Quando usare la v2
+
+Usa la v2 quando vuoi:
+
+- migliorare la qualità delle risposte rispetto alla config reale
+- avere una base più pulita per demo tecniche
+- introdurre azioni controllate su HA
+- separare bene sperimentazione e baseline stabile
+
+## Quando non sostituire subito la v1
+
+Non conviene sostituire immediatamente la v1 se ti serve:
+
+- stabilità assoluta su un setup già funzionante
+- poco tempo per regressioni e test
+- una demo semplice e già collaudata
+
+In quel caso, la v2 va trattata come branch architetturale “pronto da testare”.
+
+## Configurazione
+
+Copia il file di esempio:
+
+```bash
+cd v2
+cp .env.example .env
+```
+
+Compila almeno:
+
+- `HA_HOST`
+- `HA_TOKEN`
+- `HA_CONFIG_HOST_PATH`
+- `ALLOWED_ORIGINS`
+- `ADMIN_TOKEN`
+- `ACTION_CONFIRM_TOKEN`
+
+## Avvio
+
+```bash
+cd v2
+docker compose up -d --build
+```
+
+## Passi consigliati
+
+1. Avviare backend e agent v2.
+2. Eseguire l'ingest della config HA.
+3. Verificare la collection `ha_config`.
+4. Testare il backend `/health` e l'agent `/agent/health`.
+5. Fare query che richiedono correlazione tra config e stato reale.
+
+## Suggerimento strategico
+
+La scelta di creare `v2/` invece di una nuova repository è corretta perché:
+
+- evita frammentazione
+- mantiene la storia del progetto in un unico posto
+- consente confronto diretto v1/v2
+- permette una promozione graduale della v2 nella root solo quando sarà davvero pronta
+
+## Cosa c'è già implementato qui
+
+I file presenti in `v2/` sono **commentati** e scritti per essere leggibili anche in ottica di presentazione tecnica interna.
+
+Sono pensati come base concreta, non come semplice mockup.
