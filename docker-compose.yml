@@ -65,9 +65,14 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_HOST=http://chromadb:8000
       - LLAMA_MODEL=${LLAMA_MODEL:-llama3.1:8b}
-      - EMBED_MODEL=all-MiniLM-L6-v2
-      - TOP_K=10
-      - TRANSLATE_QUERY=false
+      - EMBED_MODEL=${EMBED_MODEL:-all-MiniLM-L6-v2}
+      - TOP_K=${TOP_K:-10}
+      - TRANSLATE_QUERY=${TRANSLATE_QUERY:-false}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-change-me}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-50}
+      - MIN_RETRIEVAL_SCORE=${MIN_RETRIEVAL_SCORE:-0.30}
+      - RETRIEVAL_OVERSAMPLE=${RETRIEVAL_OVERSAMPLE:-3}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -101,18 +106,22 @@ services:
       - "8100:8100"
     volumes:
       - ./agent:/app
-      - /home/andrea/homeassistant:/ha_config:ro
+      - ${HA_CONFIG_HOST_PATH:-/home/andrea/homeassistant}:/ha_config:ro
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_HOST=http://chromadb:8000
       - LLAMA_MODEL=${LLAMA_MODEL:-llama3.1:8b}
-      - EMBED_MODEL=all-MiniLM-L6-v2
+      - EMBED_MODEL=${EMBED_MODEL:-all-MiniLM-L6-v2}
       - HA_HOST=${HA_HOST}
       - HA_TOKEN=${HA_TOKEN}
       - HA_CONFIG_PATH=/ha_config
-      - TOP_K=8
+      - TOP_K=${AGENT_TOP_K:-8}
       - ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-false}
-      - TRANSLATE_QUERY=false
+      - ALLOW_HA_ACTIONS=${ALLOW_HA_ACTIONS:-false}
+      - ACTION_CONFIRM_TOKEN=${ACTION_CONFIRM_TOKEN:-change-me}
+      - MAX_CONFIG_CHARS=${MAX_CONFIG_CHARS:-7000}
+      - MAX_EXTRA_CHARS=${MAX_EXTRA_CHARS:-4000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
