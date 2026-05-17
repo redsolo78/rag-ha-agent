@@ -75,7 +75,7 @@ I servizi comunicano su una rete Docker interna (`rag-v2-network`). Solo le port
 - Accesso alla rete locale dove gira Home Assistant
 - Un **long-lived access token** di Home Assistant
 - Almeno **8 GB di RAM** (il modello llama3.1:8b richiede ~5 GB)
-- La cartella di configurazione HA accessibile dall'host (es. `/home/andrea/homeassistant`)
+- La cartella di configurazione HA accessibile dall'host (es. `/home/<user>/homeassistant`)
 
 ---
 
@@ -151,7 +151,7 @@ Tutte le variabili si impostano nel file `.env`.
 |---|---|---|
 | `HA_HOST` | `http://homeassistant:8123` | URL dell'istanza HA |
 | `HA_TOKEN` | _(obbligatorio)_ | Long-lived access token HA |
-| `HA_CONFIG_HOST_PATH` | `/home/andrea/homeassistant` | Percorso **sull'host** della cartella config HA — viene montata in sola lettura |
+| `HA_CONFIG_HOST_PATH` | `/home/<user>/homeassistant` | Percorso **sull'host** della cartella config HA — viene montata in sola lettura |
 
 ### Modelli
 
