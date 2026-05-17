@@ -374,10 +374,8 @@ Il file `agent/area_aliases.yaml` mappa i nomi delle aree HA con i loro alias in
 Questo permette all'agente di capire frasi come "spegni le luci del bagno di sopra" anche se l'area in HA si chiama `bagno_su`.
 
 ```yaml
-bagno_su:
-  - bagno_su
-  - bagno su
-  - bagno superiore
+bagno:
+  - bagno
 
 salotto:
   - salotto

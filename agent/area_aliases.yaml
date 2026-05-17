@@ -10,10 +10,8 @@ sala_3:
   - sala_3
   - sala 3
 
-bagno_su:
-  - bagno_su
-  - bagno su
-  - bagno superiore
+bagno:
+  - bagno
 
 bagno_giu:
   - bagno_giu
