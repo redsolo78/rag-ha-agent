@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-requests
-chromadb
-sentence-transformers
-duckduckgo-search
-ollama

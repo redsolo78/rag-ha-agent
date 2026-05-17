@@ -1,8 +1,0 @@
-fastapi
-uvicorn[standard]
-chromadb
-sentence-transformers
-ollama
-python-multipart
-requests
-pyyaml

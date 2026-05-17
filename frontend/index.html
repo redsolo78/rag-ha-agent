@@ -58,6 +58,13 @@
       font-size: 0.62rem; font-family: 'JetBrains Mono', monospace; color: var(--muted);
       cursor: default;
     }
+    .status-item.toggleable {
+      cursor: pointer; padding: 3px 8px; border-radius: 20px;
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .status-item.toggleable:hover { border-color: var(--accent); color: var(--text); }
+    .status-item.toggleable.active { border-color: var(--green); color: var(--green); background: #4ade8011; }
+    .status-item.toggleable.inactive { border-color: var(--red); color: var(--red); background: #f8717111; }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: all 0.3s; }
     .dot.ok    { background: var(--green); box-shadow: 0 0 6px var(--green); }
     .dot.error { background: var(--red);   box-shadow: 0 0 6px var(--red); }
@@ -391,6 +398,14 @@
       <div class="dot loading" id="dot-ollama"></div>
       <span id="label-ollama">Ollama</span>
     </div>
+    <div class="status-item toggleable inactive" id="websearch-toggle" onclick="toggleWebSearch()" title="Clicca per abilitare/disabilitare la ricerca web">
+      <div class="dot loading" id="dot-websearch"></div>
+      <span id="label-websearch">Web Search</span>
+    </div>
+    <div class="status-item toggleable inactive" id="haactions-toggle" onclick="toggleHaActions()" title="Clicca per abilitare/disabilitare le azioni su HA">
+      <div class="dot loading" id="dot-haactions"></div>
+      <span id="label-haactions">HA Actions</span>
+    </div>
   </div>
 </header>
 
@@ -521,6 +536,7 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
 <script>
   // ── Configurazione dinamica (letta dal backend) ──────────────
   const API = "/api";
+  const AGENT_API = "/agent";
   let systemConfig = {
     model: "...",
     topK: 10,
@@ -530,104 +546,163 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
 
   // ── Health check + carica config dal backend ─────────────────
   async function loadSystemInfo() {
+    console.log("[loadSystemInfo] start");
+
+    const setText = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+      else console.warn(`[loadSystemInfo] elemento non trovato: #${id}`);
+    };
+
+    const setClass = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.className = value;
+      else console.warn(`[loadSystemInfo] elemento non trovato: #${id}`);
+    };
+
     try {
       const r = await fetch(`${API}/health`);
+      if (!r.ok) throw new Error(`health HTTP ${r.status}`);
       const data = await r.json();
+      console.log("[loadSystemInfo] health", data);
 
-      // Aggiorna ChromaDB status
-      const chromaOk = data.chromadb?.startsWith("ok");
-      document.getElementById("dot-chroma").className = "dot " + (chromaOk ? "ok" : "error");
+      const chromaOk = typeof data.chromadb === "string" && data.chromadb.startsWith("ok");
+      setClass("dot-chroma", "dot " + (chromaOk ? "ok" : "error"));
+      setText("label-chroma", chromaOk ? "ChromaDB ✓" : "ChromaDB ✗");
 
-      // Estrai chunks count dal messaggio "ok (3128 chunks)"
-      const chunksMatch = data.chromadb?.match(/\((\d+) chunks\)/);
+      const chunksMatch = (data.chromadb || "").match(/\((\d+)\s+chunks\)/);
       if (chunksMatch) {
-        systemConfig.chunks = parseInt(chunksMatch[1]);
-        document.getElementById("info-chunks").textContent = parseInt(chunksMatch[1]).toLocaleString();
-        document.getElementById("info-chunks").className = "sys-value ok";
-      }
-      document.getElementById("label-chroma").textContent = chromaOk
-        ? `ChromaDB ✓` : "ChromaDB ✗";
-
-      // Aggiorna Ollama status
-      const ollamaOk = data.ollama?.startsWith("ok");
-      document.getElementById("dot-ollama").className = "dot " + (ollamaOk ? "ok" : "error");
-      document.getElementById("label-ollama").textContent = ollamaOk
-        ? "Ollama ✓" : "Ollama ✗";
-
-      // Estrai nome modello dal messaggio "ok (modello 'mistral' pronto)"
-      const modelMatch = data.ollama?.match(/modello '(.+?)'/);
-      if (modelMatch) {
-        systemConfig.model = modelMatch[1];
-        document.getElementById("info-model").textContent = modelMatch[1];
-        document.getElementById("info-model").className = "sys-value ok";
-        
+        systemConfig.chunks = parseInt(chunksMatch[1], 10);
+        setText("info-chunks", systemConfig.chunks.toLocaleString());
+        const el = document.getElementById("info-chunks");
+        if (el) el.className = "sys-value ok";
       }
 
+      if (data.model) {
+        systemConfig.model = data.model;
+        setText("info-model", data.model);
+        const el = document.getElementById("info-model");
+        if (el) el.className = "sys-value ok";
+      }
+
+      const ollamaOk = typeof data.ollama === "string" && data.ollama.startsWith("ok");
+      setClass("dot-ollama", "dot " + (ollamaOk ? "ok" : "error"));
+      setText("label-ollama", ollamaOk ? "Ollama ✓" : "Ollama ✗");
     } catch (e) {
-      document.getElementById("dot-chroma").className = "dot error";
-      document.getElementById("dot-ollama").className = "dot error";
+      console.error("[loadSystemInfo] health error", e);
+      setClass("dot-chroma", "dot error");
+      setClass("dot-ollama", "dot error");
+      setText("label-chroma", "ChromaDB ✗");
+      setText("label-ollama", "Ollama ✗");
     }
 
-    // Carica config
+    try {
+      const ra = await fetch(`${AGENT_API}/health`);
+      if (!ra.ok) throw new Error(`agent health HTTP ${ra.status}`);
+      const agentData = await ra.json();
+      console.log("[loadSystemInfo] agent health", agentData);
+
+      const webSearchEnabled = agentData.enable_web_search === true;
+      setClass("dot-websearch", "dot " + (webSearchEnabled ? "ok" : "error"));
+      setText("label-websearch", webSearchEnabled ? "Web Search ON" : "Web Search OFF");
+      const wsToggle = document.getElementById("websearch-toggle");
+      if (wsToggle) {
+        wsToggle.classList.toggle("active", webSearchEnabled);
+        wsToggle.classList.toggle("inactive", !webSearchEnabled);
+      }
+
+      const haActionsEnabled = agentData.allow_ha_actions === true;
+      setClass("dot-haactions", "dot " + (haActionsEnabled ? "ok" : "error"));
+      setText("label-haactions", haActionsEnabled ? "HA Actions ON" : "HA Actions OFF");
+      const toggle = document.getElementById("haactions-toggle");
+      if (toggle) {
+        toggle.classList.toggle("active", haActionsEnabled);
+        toggle.classList.toggle("inactive", !haActionsEnabled);
+      }
+    } catch (e) {
+      console.error("[loadSystemInfo] agent health error", e);
+      setClass("dot-websearch", "dot error");
+      setClass("dot-haactions", "dot error");
+      setText("label-websearch", "Web Search ✗");
+      setText("label-haactions", "HA Actions ✗");
+      const toggle = document.getElementById("haactions-toggle");
+      if (toggle) { toggle.classList.remove("active"); toggle.classList.add("inactive"); }
+      const wsToggle = document.getElementById("websearch-toggle");
+      if (wsToggle) { wsToggle.classList.remove("active"); wsToggle.classList.add("inactive"); }
+    }
+
     try {
       const r2 = await fetch(`${API}/config`);
-      if (r2.ok) {
-        const cfg = await r2.json();
-        systemConfig.topK  = cfg.top_k;
-        systemConfig.embed = cfg.embed_model;
-        document.getElementById("info-topk").textContent      = cfg.top_k;
-        document.getElementById("info-embed").textContent     = cfg.embed_model.split("/").pop();
-        document.getElementById("info-chunksize").textContent = cfg.chunk_size + " car.";
-        document.getElementById("header-subtitle").textContent =
-          `${cfg.llm_model} · chromadb · ${cfg.embed_model.split("/").pop()} · fastapi`;
-      }
-    } catch(e) {
-      document.getElementById("info-topk").textContent = systemConfig.topK;
+      if (!r2.ok) throw new Error(`config HTTP ${r2.status}`);
+      const cfg = await r2.json();
+      console.log("[loadSystemInfo] config", cfg);
+
+      systemConfig.topK = cfg.top_k ?? systemConfig.topK;
+      systemConfig.embed = cfg.embed_model ?? systemConfig.embed;
+
+      setText("info-topk", cfg.top_k ?? "n/d");
+      setText("info-embed", (cfg.embed_model || "...").split("/").pop());
+      setText("info-chunksize", (cfg.chunk_size ?? "n/d") + " car.");
+      setText(
+        "header-subtitle",
+        `${cfg.llm_model || systemConfig.model} · chromadb · ${(cfg.embed_model || "...").split("/").pop()} · fastapi`
+      );
+    } catch (e) {
+      console.error("[loadSystemInfo] config error", e);
+      setText("info-topk", systemConfig.topK);
     }
 
-    // Carica statistiche DB
     try {
       const r3 = await fetch(`${API}/stats`);
-      if (r3.ok) {
-        const stats = await r3.json();
-        // Conta i tipi di documento
-    const exts = (stats.documents || []).map(d => {
-      const name = d.name || "";
-      if (name.endsWith(".md") || name.endsWith(".markdown")) return "md";
-      if (name.endsWith(".txt")) return "txt";
-      return "pdf";
-    });
-    const counts = exts.reduce((a, e) => { a[e] = (a[e]||0)+1; return a; }, {});
-    const label = Object.entries(counts).map(([k,v]) => v+" "+k.toUpperCase()).join(", ") || stats.total_documents+" doc";
-    document.getElementById("info-docs").textContent = label;
-        document.getElementById("info-docs").className     = "sys-value ok";
-        document.getElementById("info-chunks").textContent = stats.total_chunks.toLocaleString();
-        document.getElementById("info-chunks").className   = "sys-value ok";
-        document.getElementById("info-dbsize").textContent = stats.estimated_size_mb + " MB";
-        document.getElementById("info-dbsize").className   = "sys-value ok";
+      if (!r3.ok) throw new Error(`stats HTTP ${r3.status}`);
+      const stats = await r3.json();
+      console.log("[loadSystemInfo] stats", stats);
 
-        const docsList  = document.getElementById("docs-list");
-        const docsItems = document.getElementById("docs-items");
-        docsItems.innerHTML = ""; // svuota sempre prima di ridisegnare
+      setText("info-docs", `${stats.total_documents ?? 0} doc`);
+      const infoDocs = document.getElementById("info-docs");
+      if (infoDocs) infoDocs.className = "sys-value ok";
 
-        if (stats.documents && stats.documents.length > 0) {
-          docsList.style.display = "block";
-          const topDocs = stats.documents.sort((a,b) => b.chunks - a.chunks).slice(0,5);
-          docsItems.innerHTML = topDocs.map(d => `
+      setText("info-chunks", (stats.total_chunks ?? 0).toLocaleString());
+      const infoChunks = document.getElementById("info-chunks");
+      if (infoChunks) infoChunks.className = "sys-value ok";
+
+      setText("info-dbsize", `${stats.estimated_size_mb ?? 0} MB`);
+      const infoDb = document.getElementById("info-dbsize");
+      if (infoDb) infoDb.className = "sys-value ok";
+
+      const docsList = document.getElementById("docs-list");
+      const docsItems = document.getElementById("docs-items");
+      if (docsItems) docsItems.innerHTML = "";
+
+      if (docsList && docsItems && Array.isArray(stats.documents) && stats.documents.length > 0) {
+        docsList.style.display = "block";
+        const topDocs = [...stats.documents]
+          .sort((a, b) => (b.chunks || 0) - (a.chunks || 0))
+          .slice(0, 5);
+
+        docsItems.innerHTML =
+          topDocs.map(d => `
             <div class="doc-item">
               <div class="doc-item-info">
                 <div class="doc-item-name" title="${d.name}">${d.name}</div>
-                <div class="doc-item-meta">${d.chunks.toLocaleString()} chunks · ${d.pages} pag.</div>
+                <div class="doc-item-meta">${(d.chunks || 0).toLocaleString()} chunks · ${(d.pages || 0)} pag.</div>
               </div>
-              <button class="doc-delete-btn" onclick="deleteDocument('${d.name}')" title="Elimina documento">🗑️</button>
+              <button class="doc-delete-btn" onclick="deleteDocument('${String(d.name).replace(/'/g, "\\'")}')" title="Elimina documento">🗑️</button>
             </div>
-          `).join("") + (stats.documents.length > 5
+          `).join("")
+          + (stats.documents.length > 5
             ? `<div style="font-size:0.58rem;color:var(--muted);font-family:'JetBrains Mono',monospace;padding:3px 8px;">
-                + altri ${stats.documents.length - 5} documenti...
-               </div>` : "");
-        }
+                 + altri ${stats.documents.length - 5} documenti...
+               </div>`
+            : "");
+      } else if (docsList) {
+        docsList.style.display = "none";
       }
-    } catch(e) { /* stats non disponibili */ }
+    } catch (e) {
+      console.error("[loadSystemInfo] stats error", e);
+    }
+
+    console.log("[loadSystemInfo] done");
   }
 
   loadSystemInfo();
@@ -641,29 +716,36 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
   let selectedFiles = null; // per upload multiplo da cartella
   let abortUpload   = false;
 
-  // ── Response time estimator ───────────────────────────────────
+  // ── Response time tracker ────────────────────────────────────
   const perf = {
-    samples: JSON.parse(localStorage.getItem("ha_perf") || "[]"),
-    avgTokensPerSec() {
-      if (!this.samples.length) return 12; // default: 12 tok/s
-      return this.samples.reduce((a,b) => a+b, 0) / this.samples.length;
+    _key: "ha_perf_v2",
+    _modelKey: "ha_perf_model",
+    get samples() {
+      const storedModel = localStorage.getItem(this._modelKey);
+      if (storedModel !== systemConfig.model) {
+        localStorage.removeItem(this._key);
+        localStorage.setItem(this._modelKey, systemConfig.model);
+      }
+      return JSON.parse(localStorage.getItem(this._key) || "[]");
     },
-    record(tokens, seconds) {
-      if (tokens > 0 && seconds > 0) {
-        this.samples.push(tokens / seconds);
-        if (this.samples.length > 20) this.samples.shift(); // ultimi 20
-        localStorage.setItem("ha_perf", JSON.stringify(this.samples));
+    avgSec() {
+      const s = this.samples;
+      if (!s.length) return null;
+      return s.reduce((a, b) => a + b, 0) / s.length;
+    },
+    record(seconds) {
+      if (seconds > 0) {
+        const s = this.samples;
+        s.push(Math.round(seconds));
+        if (s.length > 15) s.shift();
+        localStorage.setItem(this._key, JSON.stringify(s));
+        localStorage.setItem(this._modelKey, systemConfig.model);
       }
     },
-    estimate(promptLen, queryType) {
-      // Stima output tokens in base al tipo di domanda
-      const outputTokens = queryType === "analysis" ? 600
-                         : queryType === "simple"   ? 200
-                         : 400;
-      // Tool overhead: ~2s per tool call
-      const toolTime = queryType === "analysis" ? 6 : 2;
-      const genTime  = outputTokens / this.avgTokensPerSec();
-      return Math.round(genTime + toolTime);
+    formatEstimate() {
+      const avg = this.avgSec();
+      if (avg === null) return "";
+      return ` (media: ~${Math.round(avg)}s)`;
     }
   };
 
@@ -750,23 +832,25 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
   async function streamUpload(file, onProgress) {
     const formData = new FormData();
     formData.append("file", file);
-    const r = await fetch(`${API}/upload-pdf`, { method: "POST", body: formData });
-    if (!r.ok) { const t = await r.text(); throw new Error("HTTP " + r.status + ": " + t.substring(0,80)); }
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n"); buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const raw = line.slice(6).trim();
-        if (raw === "[DONE]") return;
-        try { const evt = JSON.parse(raw); onProgress(evt); } catch(_) {}
-      }
+
+    const r = await fetch(`${API}/upload-pdf`, {
+      method: "POST",
+      body: formData
+    });
+
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error("HTTP " + r.status + ": " + t.substring(0, 120));
     }
+
+    const data = await r.json();
+    onProgress({
+      type: "progress",
+      pct: 100,
+      msg: `Indicizzato: ${data.filename || file.name} (${data.chunks || 0} chunks)`
+    });
+
+    return data;
   }
 
   document.getElementById("stop-btn").addEventListener("click", () => {
@@ -854,12 +938,16 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
       const label = lang ? `<span class="code-lang">${lang}</span>` : "";
       return `<div class="code-block">${label}<pre><code>${escHtml(code.trim())}</code></pre></div>`;
     });
+
     // 2. Bold **testo**
     text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
     // 3. Inline `code`
     text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
     // 4. Newline → <br>
     text = text.replace(/\n/g, '<br>');
+
     return text;
   }
 
@@ -1023,7 +1111,8 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
   }
 
   // ── Agent ─────────────────────────────────────────────────────
-  const AGENT_API = window.location.origin;
+  const agentHistory = [];   // {role:"user"|"assistant", content:"..."}
+  const AGENT_HISTORY_MAX = 10;  // ultimi 5 scambi (user+assistant)
 
   function setAgentQuestion(text) {
     const input = document.getElementById("agent-input");
@@ -1083,121 +1172,159 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
     input.value = "";
     sendBtn.disabled = true;
     addAgentMessage("user", message);
+    agentHistory.push({ role: "user", content: message });
 
-    // Classifica query e stima tempo
-    const _qLower = message.toLowerCase();
-    const _qType  = (_qLower.includes("analizza") || _qLower.includes("configur") || _qLower.includes("problemi") || _qLower.includes("log"))
-                    ? "analysis" : (_qLower.length < 40 ? "simple" : "medium");
-    const _estSec = perf.estimate(message.length, _qType);
-    const _t0     = Date.now();
-    let   _tokenCount = 0;
+    const _t0 = Date.now();
+    agentThinkingDiv = addAgentStep("thinking", `🤔 Connessione... 0s${perf.formatEstimate()}`);
 
-    // Placeholder pensiero
-    agentThinkingDiv = addAgentStep("thinking", `🤔 Elaborazione in corso... (stima: ~${_estSec}s)`);
+    const _timerInterval = setInterval(() => {
+      const elapsed = Math.round((Date.now() - _t0) / 1000);
+      if (agentThinkingDiv) {
+        const span = agentThinkingDiv.querySelector(".agent-step");
+        if (span) span.textContent = `🤔 ${_lastStatus} ${elapsed}s${perf.formatEstimate()}`;
+      }
+    }, 1000);
+
+    let _lastStatus = "Elaborazione...";
+    const _abortCtrl = new AbortController();
+    const _fetchTimeout = setTimeout(() => _abortCtrl.abort(), 300000); // timeout 5 minuti
+
+    // Bubble di risposta creata subito (vuota), riempita token per token
+    let _aiBubble = null;
+    let _fullAnswer = "";
 
     try {
-      const r = await fetch(`${AGENT_API}/agent/chat`, {
+      const r = await fetch(`${AGENT_API}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message })
+        signal: _abortCtrl.signal,
+        body: JSON.stringify({
+          message,
+          history: agentHistory.slice(-(AGENT_HISTORY_MAX + 1), -1)
+        })
       });
 
-      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (!r.ok) {
+        let detail = "Errore sconosciuto";
+        try { detail = (await r.json()).detail || detail; } catch (_) { detail = await r.text(); }
+        throw new Error(`HTTP ${r.status}: ${detail}`);
+      }
 
-      const reader  = r.body.getReader();
+      const reader = r.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
-      let finalAnswerDiv = null;
-      let stepDivs = [];
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n"); buf = lines.pop();
+        const lines = buf.split("\n");
+        buf = lines.pop(); // ultima riga potenzialmente incompleta
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
-          const raw = line.slice(6).trim();
-          if (raw === "[DONE]") break;
-          try {
-            const evt = JSON.parse(raw);
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
-            if (evt.type === "thinking") {
-              if (agentThinkingDiv) agentThinkingDiv.textContent = evt.msg;
+          if (evt.type === "status") {
+            _lastStatus = evt.text;
 
-            } else if (evt.type === "action") {
+          } else if (evt.type === "token") {
+            if (!_aiBubble) {
+              // Prima del primo token: rimuovi lo spinner e crea il bubble
               if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
-              const d = addAgentStep("action", `🔧 ${evt.msg} → input: ${evt.input}`);
-              stepDivs.push(d);
-
-            } else if (evt.type === "tool_start") {
-              const d = addAgentStep("tool", `⏳ ${evt.msg}`);
-              stepDivs.push(d);
-
-            } else if (evt.type === "tool_end") {
-              // aggiorna l'ultimo step
-              if (stepDivs.length > 0) {
-                stepDivs[stepDivs.length-1].textContent = `✅ Risultato: ${evt.preview}`;
-              }
-
-            } else if (evt.type === "stream_start") {
-              if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
-              stepDivs.forEach(d => d.remove()); stepDivs = [];
-              _stepsBar = null;
-              const msgs = document.getElementById("agent-messages");
-              const div  = document.createElement("div");
-              div.className = "message";
-              const bubble = document.createElement("div");
-              bubble.className = "msg-bubble ai";
-              bubble._raw = "";
-              div.innerHTML = `<div class="msg-header"><span class="role ai">🤖 HA Agent</span><span>${new Date().toLocaleTimeString('it-IT')}</span></div>`;
-              div.appendChild(bubble);
-              msgs.appendChild(div);
-              msgs.scrollTop = msgs.scrollHeight;
-              finalAnswerDiv = bubble;
-
-            } else if (evt.type === "stream_token") {
-              _tokenCount++;
-              if (finalAnswerDiv) {
-                finalAnswerDiv._raw += evt.token;
-                finalAnswerDiv.textContent = finalAnswerDiv._raw;
-                document.getElementById("agent-messages").scrollTop = 99999;
-              }
-
-            } else if (evt.type === "stream_end") {
-              if (finalAnswerDiv) {
-                finalAnswerDiv.innerHTML = formatText(finalAnswerDiv._raw);
-                const elapsed = (Date.now() - _t0) / 1000;
-                perf.record(_tokenCount, elapsed);
-                const tokSec = (_tokenCount / elapsed).toFixed(1);
-                const timer  = document.createElement("div");
-                timer.style.cssText = "font-size:0.6rem;color:var(--muted);margin-top:6px;text-align:right";
-                timer.textContent   = `⏱ ${elapsed.toFixed(1)}s · ${tokSec} tok/s · stima era ~${_estSec}s`;
-                finalAnswerDiv.parentElement.appendChild(timer);
-              }
-              finalAnswerDiv = null;
-
-            } else if (evt.type === "final") {
-              if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
-              stepDivs.forEach(d => d.remove()); stepDivs = [];
-              addAgentMessage("ai", evt.answer);
-
-            } else if (evt.type === "error") {
-              if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
-              addAgentStep("error", evt.msg);
+              _aiBubble = addAgentMessage("ai", "");
             }
-          } catch(_) {}
+            _fullAnswer += evt.content;
+            const bubble = _aiBubble.querySelector(".msg-bubble");
+            if (bubble) bubble.innerHTML = formatText(_fullAnswer);
+            const msgs = document.getElementById("agent-messages");
+            msgs.scrollTop = msgs.scrollHeight;
+
+          } else if (evt.type === "error") {
+            throw new Error(evt.text);
+
+          } else if (evt.type === "done") {
+            perf.record((Date.now() - _t0) / 1000);
+            if (_fullAnswer) {
+              agentHistory.push({ role: "assistant", content: _fullAnswer });
+              if (agentHistory.length > AGENT_HISTORY_MAX * 2) agentHistory.splice(0, 2);
+            }
+          }
         }
       }
 
+      clearTimeout(_fetchTimeout);
+      clearInterval(_timerInterval);
+      if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
+      if (!_aiBubble && !_fullAnswer) {
+        addAgentStep("error", "❌ Nessuna risposta ricevuta.");
+      }
+
     } catch(e) {
-      if (agentThinkingDiv) agentThinkingDiv.remove();
-      addAgentStep("error", "❌ Errore connessione: " + e.message);
+      clearTimeout(_fetchTimeout);
+      clearInterval(_timerInterval);
+      if (agentThinkingDiv) { agentThinkingDiv.remove(); agentThinkingDiv = null; }
+      const msg = e.name === "AbortError" ? "Timeout: nessuna risposta entro 5 minuti" : e.message;
+      addAgentStep("error", "❌ " + msg);
     }
 
     sendBtn.disabled = false;
     input.focus();
+  }
+
+  async function toggleWebSearch() {
+    const toggle = document.getElementById("websearch-toggle");
+    const dot    = document.getElementById("dot-websearch");
+    const label  = document.getElementById("label-websearch");
+    if (!toggle) return;
+
+    toggle.style.pointerEvents = "none";
+    dot.className = "dot loading";
+
+    try {
+      const r = await fetch(`${AGENT_API}/settings/web-search/toggle`, { method: "POST" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const on = data.enable_web_search === true;
+      dot.className     = "dot " + (on ? "ok" : "error");
+      label.textContent = on ? "Web Search ON" : "Web Search OFF";
+      toggle.classList.toggle("active",   on);
+      toggle.classList.toggle("inactive", !on);
+    } catch(e) {
+      dot.className = "dot error";
+      label.textContent = "Web Search ERR";
+      console.error("toggle web-search failed", e);
+    } finally {
+      toggle.style.pointerEvents = "";
+    }
+  }
+
+  async function toggleHaActions() {
+    const toggle = document.getElementById("haactions-toggle");
+    const dot    = document.getElementById("dot-haactions");
+    const label  = document.getElementById("label-haactions");
+    if (!toggle) return;
+
+    toggle.style.pointerEvents = "none";
+    dot.className = "dot loading";
+
+    try {
+      const r = await fetch(`${AGENT_API}/settings/ha-actions/toggle`, { method: "POST" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const on = data.allow_ha_actions === true;
+      dot.className   = "dot " + (on ? "ok" : "error");
+      label.textContent = on ? "HA Actions ON" : "HA Actions OFF";
+      toggle.classList.toggle("active",   on);
+      toggle.classList.toggle("inactive", !on);
+    } catch(e) {
+      dot.className = "dot error";
+      label.textContent = "HA Actions ERR";
+      console.error("toggle ha-actions failed", e);
+    } finally {
+      toggle.style.pointerEvents = "";
+    }
   }
 
 </script>

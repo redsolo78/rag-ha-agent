@@ -1,50 +1,78 @@
 """
-RAG Chatbot - FastAPI Backend
+Backend RAG v2.
+
+Questa versione introduce tre miglioramenti principali rispetto alla v1:
+1. collection separate per documenti e configurazione HA
+2. retrieval multi-source con oversampling e deduplica
+3. prompt più trasparente e meno incline a risposte non grounded
+
+Fix aggiuntivi:
+- /config e /stats compatibili con il frontend
+- nessuna chiamata al modello se non ci sono chunk rilevanti
+- endpoint di upload compatibile anche con /upload-pdf
+- endpoint di cancellazione DB/documenti per la UI
 """
 
-import asyncio
+from __future__ import annotations
+
 import os
-import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Iterable
 from urllib.parse import urlparse
 
 import chromadb
+import requests
 import ollama
-from chromadb.utils import embedding_functions
+from rank_bm25 import BM25Okapi
+try:
+    from ingest_ha_config import ingest_home_assistant_config as _ingest_ha_config
+except ImportError:
+    _ingest_ha_config = None
+class OllamaEmbeddingFunction:
+    """Embedding via Ollama — usa nomic-embed-text o qualsiasi modello embed Ollama."""
+    def __init__(self, model: str, host: str):
+        self.model = model
+        self.host = host.rstrip("/")
+
+    def name(self) -> str:
+        return f"ollama:{self.model}"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        resp = requests.post(
+            f"{self.host}/api/embed",
+            json={"model": self.model, "input": input},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["embeddings"]
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from functools import lru_cache
 
-# ── Configurazione da env vars (Docker) ─────────────────────────────────────
+# ── Configurazione da environment ──────────────────────────────────────────
 CHROMA_HOST = os.getenv("CHROMA_HOST", "http://chromadb:8000")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
-COLLECTION = os.getenv("COLLECTION", "documents")
+
+DOCS_COLLECTION = os.getenv("DOCS_COLLECTION", "documents")
+CONFIG_COLLECTION = os.getenv("CONFIG_COLLECTION", "ha_config")
+
 EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
-LLAMA_MODEL = os.getenv("LLAMA_MODEL", "llama3")
-TRANSLATE_QUERY = os.getenv("TRANSLATE_QUERY", "false").lower() == "true"
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+LLAMA_MODEL = os.getenv("LLAMA_MODEL", "llama3.1:8b")
+
+TOP_K = int(os.getenv("TOP_K", "10"))
+RETRIEVAL_OVERSAMPLE = int(os.getenv("RETRIEVAL_OVERSAMPLE", "3"))
+MIN_RETRIEVAL_SCORE = float(os.getenv("MIN_RETRIEVAL_SCORE", "0.30"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
-MIN_SCORE = float(os.getenv("MIN_RETRIEVAL_SCORE", "0.30"))
-OVERSAMPLE_FACTOR = max(int(os.getenv("RETRIEVAL_OVERSAMPLE", "3")), 1)
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
-
-def get_env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-TOP_K_DEFAULT = max(get_env_int("TOP_K", 10), 1)
-CHUNK_SIZE_ESTIMATE = max(get_env_int("CHUNK_SIZE", 1200), 1)
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 
 
 def parse_allowed_origins() -> list[str]:
+    """Converte la lista CSV di origin in una lista Python pulita."""
     raw = os.getenv(
         "ALLOWED_ORIGINS",
         "http://localhost:3000,http://127.0.0.1:3000",
@@ -53,11 +81,45 @@ def parse_allowed_origins() -> list[str]:
 
 
 ALLOWED_ORIGINS = parse_allowed_origins()
-SUPPORTED_UPLOAD_EXTENSIONS = {".pdf", ".txt", ".md", ".markdown"}
 
-# ────────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="RAG Chatbot API", version="1.1.0")
+# ── Smart text splitting (sentence-boundary aware) ─────────────────────────
+def _split_text_smart(text: str, chunk_size: int, overlap: int) -> list[str]:
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end < len(text):
+            boundary = text.rfind(". ", start, end)
+            if boundary == -1:
+                boundary = text.rfind("\n", start, end)
+            if boundary != -1 and boundary > start + chunk_size // 2:
+                end = boundary + 1
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = end - overlap
+    return chunks
 
+
+# ── BM25 hybrid reranking ──────────────────────────────────────────────────
+def _bm25_rerank_hits(
+    query: str, hits: list[SearchHit], alpha: float = 0.6
+) -> list[SearchHit]:
+    if len(hits) <= 1:
+        return hits
+    tokenized = [h.text.lower().split() for h in hits]
+    bm25 = BM25Okapi(tokenized)
+    raw = bm25.get_scores(query.lower().split())
+    max_raw = max(raw) if max(raw) > 0 else 1.0
+    scored = [
+        (alpha * h.score + (1 - alpha) * (raw[i] / max_raw), h)
+        for i, h in enumerate(hits)
+    ]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [h for _, h in scored]
+
+
+app = FastAPI(title="RAG HA Agent Backend v2", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -67,178 +129,366 @@ app.add_middleware(
 )
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
-def parse_host(url: str) -> tuple[str, int]:
-    parsed = urlparse(url)
-    return parsed.hostname or "localhost", parsed.port or 80
-
-
-def require_admin_token(x_admin_token: str | None) -> None:
-    if not ADMIN_TOKEN:
-        raise HTTPException(
-            status_code=503,
-            detail="Operazione amministrativa disabilitata: ADMIN_TOKEN non configurato.",
-        )
-    if x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Token amministrativo non valido.")
-
-
-def get_collection():
-    """ChromaDB via HTTP (Docker)."""
-    host, port = parse_host(CHROMA_HOST)
-    client = chromadb.HttpClient(host=host, port=port)
-    embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=EMBED_MODEL
-    )
-    return client.get_or_create_collection(
-        name=COLLECTION,
-        embedding_function=embed_fn,
-        metadata={"hnsw:space": "cosine"},
-    )
-
-
-def get_ollama():
-    """Ollama client con host da env var."""
-    return ollama.Client(host=OLLAMA_HOST)
-
-
-def clamp_top_k(value: int) -> int:
-    return max(1, min(value, 20))
-
-
-def normalize_filename(filename: str | None) -> str:
-    if not filename:
-        return "uploaded_file"
-    return Path(filename).name
-
-
-def metadata_source_name(meta: dict[str, Any] | None) -> str:
-    if not meta:
-        return "unknown"
-    return str(meta.get("source", "unknown")).split("/")[-1]
-
-
-# ── Modelli dati ────────────────────────────────────────────────────────────
-class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1)
-    top_k: int = Field(default=TOP_K_DEFAULT, ge=1, le=20)
-    stream: bool = False
-
-
-class ChunkResult(BaseModel):
+@dataclass
+class SearchHit:
+    """Struttura interna per rappresentare un chunk recuperato."""
     text: str
     source: str
     page: int
     score: float
+    collection: str
+    chunk_id: str
+
+
+class ChatRequest(BaseModel):
+    """Payload della chat RAG v2."""
+    question: str = Field(..., min_length=1)
+    top_k: int = Field(default=TOP_K, ge=1, le=20)
+
+
+class SearchHitResponse(BaseModel):
+    """Versione serializzabile del chunk da restituire al frontend."""
+    text: str
+    source: str
+    page: int
+    score: float
+    collection: str
 
 
 class ChatResponse(BaseModel):
+    """Risposta strutturata della chat."""
     answer: str
-    chunks: list[ChunkResult]
     model: str
+    chunks: list[SearchHitResponse]
+    grounded: bool = True
 
 
-# ── Core logic ──────────────────────────────────────────────────────────────
-def translate_query(question: str) -> str:
-    """Traduce la query in inglese per documenti in inglese."""
-    client_ollama = get_ollama()
-    resp = client_ollama.chat(
-        model=LLAMA_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Translate this to English, reply ONLY with the translation, "
-                    f"no explanation: {question}"
-                ),
-            }
-        ],
-        options={"temperature": 0, "num_predict": 100},
+class ReindexRequest(BaseModel):
+    """Payload per lanciare l'indicizzazione della config HA."""
+    config_root: str = "/ha_config"
+    collection_name: str = CONFIG_COLLECTION
+
+
+class DeleteAllResponse(BaseModel):
+    """Risposta dello svuotamento DB."""
+    chunks_deleted: int
+    collections_cleared: list[str]
+
+
+# ── Helper per Chroma e Ollama ─────────────────────────────────────────────
+@lru_cache(maxsize=1)
+def get_chroma_client() -> chromadb.HttpClient:
+    """Restituisce un solo client HTTP verso ChromaDB, riusato tra le chiamate."""
+    parsed = urlparse(CHROMA_HOST)
+    return chromadb.HttpClient(
+        host=parsed.hostname or "chromadb",
+        port=parsed.port or 8000,
     )
-    return resp["message"]["content"].strip()
 
 
-def retrieve_chunks(question: str, top_k: int) -> list[ChunkResult]:
-    collection = get_collection()
-    requested = clamp_top_k(top_k)
-    raw_limit = min(max(requested * OVERSAMPLE_FACTOR, requested), 50)
+def get_embedding_function():
+    """Embedding function condivisa tra collection diverse."""
+    return OllamaEmbeddingFunction(model=EMBED_MODEL, host=OLLAMA_HOST)
+
+
+def get_collection(name: str):
+    """Restituisce o crea una collection con spazio vettoriale cosine."""
+    return get_chroma_client().get_or_create_collection(
+        name=name,
+        embedding_function=get_embedding_function(),
+        metadata={"hnsw:space": "cosine"},
+    )
+
+def get_raw_chroma_client() -> chromadb.HttpClient:
+    """Client Chroma senza embedding function, utile per operazioni admin."""
+    parsed = urlparse(CHROMA_HOST)
+    return chromadb.HttpClient(
+        host=parsed.hostname or "chromadb",
+        port=parsed.port or 8000,
+    )
+
+
+def reset_collection(collection_name: str) -> dict:
+    """
+    Elimina e ricrea una collection Chroma.
+
+    Utile per fare reset pulito di documenti o config prima di una nuova ingestione.
+    """
+    client = get_raw_chroma_client()
+
+    existing = {c.name for c in client.list_collections()}
+    existed_before = collection_name in existing
+
+    if existed_before:
+        client.delete_collection(collection_name)
+
+    # Ricrea la collection con la stessa configurazione attesa dal backend
+    client.get_or_create_collection(
+        name=collection_name,
+        embedding_function=get_embedding_function(),
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    return {
+        "status": "ok",
+        "collection": collection_name,
+        "existed_before": existed_before,
+        "reset": True,
+    }
+
+def get_ollama() -> ollama.Client:
+    """Client Ollama locale."""
+    return ollama.Client(host=OLLAMA_HOST)
+
+
+# ── Retrieval multi-source ─────────────────────────────────────────────────
+def normalize_score(distance: float) -> float:
+    """Converte una distance cosine in uno score intuitivo 0..1."""
+    return round(1 - (distance / 2), 4)
+
+
+def query_collection(collection_name: str, question: str, top_k: int) -> list[SearchHit]:
+    """Recupera risultati da una singola collection con oversampling."""
+    collection = get_collection(collection_name)
+    requested = max(top_k * RETRIEVAL_OVERSAMPLE, top_k)
+
     results = collection.query(
         query_texts=[question],
-        n_results=raw_limit,
+        n_results=requested,
         include=["documents", "metadatas", "distances"],
     )
 
-    docs = (results.get("documents") or [[]])[0]
-    metas = (results.get("metadatas") or [[]])[0]
-    distances = (results.get("distances") or [[]])[0]
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+    ids = (
+        results.get("ids", [[]])[0]
+        if results.get("ids")
+        else [f"{collection_name}-{i}" for i, _ in enumerate(documents)]
+    )
 
-    dedup_seen: set[tuple[str, int]] = set()
-    chunks: list[ChunkResult] = []
-
-    for doc, meta, dist in zip(docs, metas, distances):
-        similarity_score = round(1 - (float(dist) / 2), 4)
-        source_name = metadata_source_name(meta)
-        page = int((meta or {}).get("page", 0) or 0)
-        dedup_key = (source_name, page)
-        if similarity_score < MIN_SCORE or dedup_key in dedup_seen:
+    hits: list[SearchHit] = []
+    for doc, meta, dist, chunk_id in zip(documents, metadatas, distances, ids):
+        meta = meta or {}
+        score = normalize_score(dist)
+        if score < MIN_RETRIEVAL_SCORE:
             continue
-        dedup_seen.add(dedup_key)
-        chunks.append(
-            ChunkResult(
+
+        hits.append(
+            SearchHit(
                 text=doc,
-                source=source_name,
-                page=page,
-                score=similarity_score,
+                source=meta.get("source", "unknown"),
+                page=int(meta.get("page", 0)),
+                score=score,
+                collection=collection_name,
+                chunk_id=str(chunk_id),
             )
         )
-        if len(chunks) >= requested:
-            break
-
-    return chunks
+    return hits
 
 
-def build_prompt(question: str, chunks: list[ChunkResult]) -> str:
-    if not chunks:
-        context = "Nessun documento rilevante trovato nel database."
-    else:
-        context_parts = []
-        for i, chunk in enumerate(chunks, 1):
-            context_parts.append(
-                f"[Fonte {i} - File {chunk.source} - Pagina {chunk.page} - Rilevanza: {chunk.score:.0%}]\n{chunk.text}"
-            )
-        context = "\n\n---\n\n".join(context_parts)
+def deduplicate_hits(hits: Iterable[SearchHit]) -> list[SearchHit]:
+    """Rimuove duplicati basandosi su collection, source e prefisso testuale."""
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[SearchHit] = []
 
-    return f"""Sei un assistente esperto che risponde basandosi PRIORITARIAMENTE sui documenti forniti.
+    for hit in sorted(hits, key=lambda item: item.score, reverse=True):
+        signature = (hit.collection, hit.source, hit.text[:180])
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(hit)
 
-REGOLE:
-1. Usa le informazioni nel contesto come fonte principale.
-2. Se il contesto è insufficiente, dichiaralo esplicitamente invece di inventare dettagli.
-3. Combina più fonti solo se sono coerenti tra loro.
-4. Per comandi Linux includi descrizione, sintassi e almeno un esempio pratico se presenti nel contesto.
-5. Rispondi nella stessa lingua della domanda.
-6. Cita sempre file e pagina quando fai affermazioni fattuali prese dal contesto.
+    return unique
 
-═══════════════════════════════════════
-CONTESTO INDICIZZATO:
-═══════════════════════════════════════
+
+def retrieve_chunks(question: str, top_k: int) -> list[SearchHit]:
+    """Interroga sia la collection documentale sia quella della config HA, poi riordina con BM25."""
+    docs_hits = query_collection(DOCS_COLLECTION, question, top_k)
+    config_hits = query_collection(CONFIG_COLLECTION, question, top_k)
+    merged = deduplicate_hits([*docs_hits, *config_hits])
+    reranked = _bm25_rerank_hits(question, merged)
+    return reranked[:top_k]
+
+
+# ── Prompt building ────────────────────────────────────────────────────────
+def build_prompt(question: str, hits: list[SearchHit]) -> str:
+    """Costruisce un prompt grounded, trasparente, con few-shot examples."""
+    parts = []
+    for idx, hit in enumerate(hits, start=1):
+        parts.append(
+            f"[Fonte {idx} | {Path(hit.source).name} | score={hit.score:.0%} | tipo={hit.collection} | pag.{hit.page}]\n{hit.text}"
+        )
+    context = "\n\n---\n\n".join(parts) if parts else "Nessun documento rilevante trovato."
+
+    return f"""Sei un esperto tecnico di Home Assistant. Rispondi SEMPRE in italiano.
+
+Le fonti sono ordinate per rilevanza decrescente (Fonte 1 = più pertinente, già pesata con BM25 + similarità semantica).
+
+REGOLE ASSOLUTE:
+1. Usa SOLO le informazioni presenti nelle fonti fornite.
+2. Per ogni affermazione fattuale cita la fonte: [Fonte N - nomefile].
+3. Se l'informazione NON è nelle fonti, scrivi: "Non ho dati su questo nel contesto fornito."
+4. Non inventare configurazioni, entità, valori o comportamenti non presenti nelle fonti.
+5. Distingui certezza (presente nelle fonti) da ipotesi (usa "probabilmente", "potrebbe").
+6. Mostra configurazioni YAML in blocchi ```yaml ... ```.
+7. Rispondi in modo strutturato: prima risposta diretta, poi dettagli.
+
+ESEMPIO CORRETTO:
+  Domanda: "Come si configura il sensore di temperatura?"
+  Risposta: "Dalla [Fonte 1 - configuration.yaml] la configurazione esistente è:
+  ```yaml
+  sensor:
+    - platform: template
+  ```
+  Per aggiungere il sensore, devi..."
+
+ESEMPIO SBAGLIATO:
+  "Devi usare la piattaforma mqtt." (se mqtt non è nelle fonti)
+
+=== FONTI (ordinate per rilevanza, Fonte 1 = più rilevante) ===
 {context}
 
-═══════════════════════════════════════
-DOMANDA: {question}
-═══════════════════════════════════════
+=== DOMANDA ===
+{question}
 
-RISPOSTA DETTAGLIATA:"""
+=== RISPOSTA ==="""
 
 
-# ── API ─────────────────────────────────────────────────────────────────────
+# ── Utility statistiche ────────────────────────────────────────────────────
+def estimate_db_size_mb(total_chunks: int) -> float:
+    """Stima semplice della dimensione DB per la UI."""
+    estimated_bytes = total_chunks * 1500
+    return round(estimated_bytes / (1024 * 1024), 2)
+
+
+def list_docs_documents() -> list[dict]:
+    """Costruisce una lista semplificata dei documenti caricati nella collection docs."""
+    collection = get_collection(DOCS_COLLECTION)
+    raw = collection.get(include=["metadatas"])
+
+    metadatas = raw.get("metadatas", []) or []
+    grouped: dict[str, dict] = {}
+
+    for meta in metadatas:
+        meta = meta or {}
+        source = meta.get("source", "unknown")
+        grouped.setdefault(
+            source,
+            {
+                "name": source,
+                "chunks": 0,
+                "pages": 0,
+            },
+        )
+        grouped[source]["chunks"] += 1
+        grouped[source]["pages"] = max(grouped[source]["pages"], int(meta.get("page", 0)) + 1)
+
+    return sorted(grouped.values(), key=lambda item: item["name"].lower())
+
+
+# ── Endpoint FastAPI ───────────────────────────────────────────────────────
+@app.get("/health")
+def health() -> dict:
+    """Endpoint rapido per verificare lo stato del backend v2."""
+    info = {
+        "api": "ok",
+        "model": LLAMA_MODEL,
+        "docs_collection": DOCS_COLLECTION,
+        "config_collection": CONFIG_COLLECTION,
+        "allowed_origins": ALLOWED_ORIGINS,
+        "admin_protected_endpoints": bool(ADMIN_TOKEN),
+    }
+
+    try:
+        docs_count = get_collection(DOCS_COLLECTION).count()
+        config_count = get_collection(CONFIG_COLLECTION).count()
+        total_chunks = docs_count + config_count
+        info["chromadb"] = f"ok ({total_chunks} chunks)"
+        info["chromadb_details"] = {
+            "documents_chunks": docs_count,
+            "config_chunks": config_count,
+        }
+    except Exception as exc:
+        info["chromadb"] = f"error: {exc}"
+
+    try:
+        tags = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+        tags.raise_for_status()
+        payload = tags.json() if tags.text else {}
+        model_names = []
+        for item in payload.get("models", []):
+            name = item.get("name")
+            if name:
+                model_names.append(name)
+
+        if LLAMA_MODEL in model_names:
+            info["ollama"] = f"ok (modello '{LLAMA_MODEL}' pronto)"
+        else:
+            info["ollama"] = f"warn (modello '{LLAMA_MODEL}' non presente)"
+            info["ollama_models"] = model_names
+    except Exception as exc:
+        info["ollama"] = f"error: {exc}"
+
+    return info
+
+
+@app.get("/config")
+def config() -> dict:
+    """Config minima compatibile con il frontend."""
+    return {
+        "llm_model": LLAMA_MODEL,
+        "embed_model": EMBED_MODEL,
+        "top_k": TOP_K,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "docs_collection": DOCS_COLLECTION,
+        "config_collection": CONFIG_COLLECTION,
+    }
+
+
+@app.get("/stats")
+def stats() -> dict:
+    """Statistiche semplici per alimentare la sidebar del frontend."""
+    docs_chunks = get_collection(DOCS_COLLECTION).count()
+    config_chunks = get_collection(CONFIG_COLLECTION).count()
+    total_chunks = docs_chunks + config_chunks
+    documents = list_docs_documents()
+
+    return {
+        "documents_chunks": docs_chunks,
+        "config_chunks": config_chunks,
+        "total_chunks": total_chunks,
+        "total_documents": len(documents),
+        "estimated_size_mb": estimate_db_size_mb(total_chunks),
+        "documents": documents,
+    }
+
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    if not req.question.strip():
-        raise HTTPException(400, "La domanda non può essere vuota")
+def chat(req: ChatRequest) -> ChatResponse:
+    """Esegue retrieval multi-source e genera una risposta grounded.
 
-    query = translate_query(req.question) if TRANSLATE_QUERY else req.question
-    chunks = retrieve_chunks(query, req.top_k)
-    prompt = build_prompt(req.question, chunks)
+    Se non esistono chunk rilevanti, NON chiama Ollama e restituisce
+    una risposta onesta e controllata.
+    """
+    hits = retrieve_chunks(req.question, req.top_k)
+
+    if not hits:
+        return ChatResponse(
+            answer=(
+                "Non ho trovato contenuti rilevanti nelle collection indicizzate.\n\n"
+                "Per ottenere risposte contestuali devi prima:\n"
+                "- caricare documenti nella collection documentale, oppure\n"
+                "- indicizzare la configurazione di Home Assistant.\n\n"
+                "In questo momento non posso rispondere in modo grounded alla tua domanda."
+            ),
+            model=LLAMA_MODEL,
+            chunks=[],
+            grounded=False,
+        )
+
+    prompt = build_prompt(req.question, hits)
 
     try:
         response = get_ollama().chat(
@@ -246,267 +496,174 @@ async def chat(req: ChatRequest):
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0.1, "top_p": 0.9, "num_predict": 2048},
         )
-        answer = response["message"]["content"]
     except Exception as exc:
-        raise HTTPException(500, f"Errore Llama: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Errore Ollama: {exc}") from exc
 
-    return ChatResponse(answer=answer, chunks=chunks, model=LLAMA_MODEL)
-
-
-@app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
-    query = translate_query(req.question) if TRANSLATE_QUERY else req.question
-    chunks = retrieve_chunks(query, req.top_k)
-    prompt = build_prompt(req.question, chunks)
-
-    async def generate() -> AsyncGenerator[str, None]:
-        import json
-
-        yield (
-            f"data: {json.dumps({'type': 'chunks', 'chunks': [c.model_dump() for c in chunks]})}\n\n"
-        )
-        try:
-            stream = get_ollama().chat(
-                model=LLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=True,
-                options={"temperature": 0.1},
+    return ChatResponse(
+        answer=response["message"]["content"],
+        model=LLAMA_MODEL,
+        chunks=[
+            SearchHitResponse(
+                text=hit.text,
+                source=hit.source,
+                page=hit.page,
+                score=hit.score,
+                collection=hit.collection,
             )
-            for part in stream:
-                yield (
-                    f"data: {json.dumps({'type': 'token', 'text': part['message']['content']})}\n\n"
-                )
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
-        yield "data: [DONE]\n\n"
+            for hit in hits
+        ],
+        grounded=True,
+    )
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.post("/upload-document")
+async def upload_document(file: UploadFile = File(...)) -> dict:
+    """Upload semplice di documenti per la collection documentale."""
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in {".txt", ".md", ".markdown", ".yaml", ".yml", ".json", ".pdf"}:
+        raise HTTPException(status_code=400, detail="Formato non supportato per l'upload v2.")
+
+    content = await file.read()
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail="File troppo grande.")
+
+    text = content.decode("utf-8", errors="ignore")
+    if not text.strip():
+        text = f"File caricato: {file.filename or 'upload'}"
+
+    chunks = _split_text_smart(text, CHUNK_SIZE, CHUNK_OVERLAP)
+
+    collection = get_collection(DOCS_COLLECTION)
+    ids = [f"upload::{file.filename}::{idx}" for idx, _ in enumerate(chunks)]
+    metadatas = [
+        {
+            "source": file.filename or "upload",
+            "page": idx,
+            "source_kind": "upload",
+        }
+        for idx, _ in enumerate(chunks)
+    ]
+    collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
+
+    return {
+        "status": "ok",
+        "filename": file.filename,
+        "chunks": len(chunks),
+        "collection": DOCS_COLLECTION,
+    }
 
 
 @app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
-    import json as _json
-
-    filename = normalize_filename(file.filename)
-    ext = Path(filename).suffix.lower()
-    if ext not in SUPPORTED_UPLOAD_EXTENSIONS:
-        raise HTTPException(
-            400,
-            "Formato non supportato. Usa .pdf, .txt, .md o .markdown",
-        )
-
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(400, "Il file caricato è vuoto")
-    if len(payload) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, f"File troppo grande. Limite: {MAX_UPLOAD_MB} MB")
-
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(payload)
-        tmp_path = tmp.name
-
-    async def stream_progress():
-        proc = await asyncio.create_subprocess_exec(
-            "python",
-            "ingest.py",
-            "--pdf",
-            tmp_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(Path(__file__).parent),
-        )
-
-        yield f"data: {_json.dumps({'type':'progress','pct':5,'msg':'📄 Lettura documento...'})}\n\n"
-
-        async for line in proc.stdout:
-            text = line.decode("utf-8", errors="ignore").strip()
-            if "Lettura e chunking" in text:
-                yield f"data: {_json.dumps({'type':'progress','pct':10,'msg':'📄 Lettura e chunking...'})}\n\n"
-            elif "Chunking completato" in text or "Chunk totali" in text:
-                yield f"data: {_json.dumps({'type':'progress','pct':30,'msg':'✂️ Chunking completato'})}\n\n"
-            elif "Creazione embedding" in text:
-                yield f"data: {_json.dumps({'type':'progress','pct':40,'msg':'🔢 Creazione embedding...'})}\n\n"
-            elif "chunks esistenti" in text:
-                yield f"data: {_json.dumps({'type':'progress','pct':50,'msg':'💾 Connessione ChromaDB...'})}\n\n"
-            elif "Salvataggio in ChromaDB" in text:
-                yield f"data: {_json.dumps({'type':'progress','pct':60,'msg':'💾 Salvataggio embedding...'})}\n\n"
-            elif "Completato" in text and "batch" in text:
-                yield f"data: {_json.dumps({'type':'progress','pct':90,'msg':'⚡ Indicizzazione...'})}\n\n"
-            elif "saltati" in text and "⚠️" in text:
-                yield f"data: {_json.dumps({'type':'progress','pct':85,'msg':text})}\n\n"
-
-        await proc.wait()
-        Path(tmp_path).unlink(missing_ok=True)
-
-        if proc.returncode != 0:
-            err = (await proc.stderr.read()).decode("utf-8", errors="ignore")
-            yield f"data: {_json.dumps({'type':'error','msg':f'Errore ingestion: {err[:300]}'})}\n\n"
-        else:
-            yield f"data: {_json.dumps({'type':'progress','pct':100,'msg':'✅ Completato!'})}\n\n"
-            done_msg = f"File '{filename}' indicizzato con successo"
-            yield f"data: {_json.dumps({'type':'done','message':done_msg})}\n\n"
-
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(stream_progress(), media_type="text/event-stream")
+async def upload_pdf_compat(file: UploadFile = File(...)) -> dict:
+    """Alias compatibile con il frontend esistente."""
+    return await upload_document(file)
 
 
-@app.get("/health")
-async def health():
-    status: dict[str, Any] = {
-        "api": "ok",
-        "chromadb": "unknown",
-        "ollama": "unknown",
-        "allowed_origins": ALLOWED_ORIGINS,
-        "admin_protected_endpoints": bool(ADMIN_TOKEN),
-    }
+@app.delete("/documents/all", response_model=DeleteAllResponse)
+def delete_all_documents(x_admin_token: str | None = Header(default=None)) -> DeleteAllResponse:
+    """Svuota completamente le collection principali."""
+    if ADMIN_TOKEN and x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Admin token non valido.")
 
-    try:
-        col = get_collection()
-        status["chromadb"] = f"ok ({col.count()} chunks)"
-    except Exception as exc:
-        status["chromadb"] = f"error: {exc}"
+    docs = get_collection(DOCS_COLLECTION)
+    cfg = get_collection(CONFIG_COLLECTION)
 
-    try:
-        result = get_ollama().list()
-        model_names = [m.model for m in result.models]
-        base_name = LLAMA_MODEL.split(":")[0]
-        if any(base_name in model for model in model_names):
-            status["ollama"] = f"ok (modello '{LLAMA_MODEL}' pronto)"
-        else:
-            status["ollama"] = f"connesso ma '{LLAMA_MODEL}' non trovato. Modelli: {model_names}"
-    except Exception as exc:
-        status["ollama"] = f"non raggiungibile: {exc}"
+    docs_deleted = docs.count()
+    cfg_deleted = cfg.count()
 
-    return status
+    docs_raw = docs.get(include=[])
+    cfg_raw = cfg.get(include=[])
 
+    docs_ids = docs_raw.get("ids", []) or []
+    cfg_ids = cfg_raw.get("ids", []) or []
 
-@app.get("/chunks")
-async def list_chunks(limit: int = 10, offset: int = 0):
-    try:
-        col = get_collection()
-        limit = max(1, min(limit, 100))
-        offset = max(0, offset)
-        results = col.get(limit=limit, offset=offset, include=["documents", "metadatas"])
-        return {
-            "total_chunks": col.count(),
-            "chunks": [
-                {
-                    "id": id_,
-                    "text": (doc[:200] + "...") if len(doc) > 200 else doc,
-                    "metadata": meta,
-                }
-                for id_, doc, meta in zip(
-                    results.get("ids", []),
-                    results.get("documents", []),
-                    results.get("metadatas", []),
-                )
-            ],
-        }
-    except Exception as exc:
-        raise HTTPException(500, str(exc)) from exc
+    if docs_ids:
+        docs.delete(ids=docs_ids)
+    if cfg_ids:
+        cfg.delete(ids=cfg_ids)
 
-
-@app.get("/config")
-async def get_config():
-    return {
-        "llm_model": LLAMA_MODEL,
-        "embed_model": EMBED_MODEL,
-        "top_k": TOP_K_DEFAULT,
-        "chunk_size": CHUNK_SIZE_ESTIMATE,
-        "ollama_host": OLLAMA_HOST,
-        "chroma_host": CHROMA_HOST,
-        "translate_query": TRANSLATE_QUERY,
-        "allowed_origins": ALLOWED_ORIGINS,
-        "max_upload_mb": MAX_UPLOAD_MB,
-    }
-
-
-@app.get("/stats")
-async def get_stats():
-    try:
-        col = get_collection()
-        total_chunks = col.count()
-        batch_size = 500
-        sources: dict[str, dict[str, Any]] = {}
-        offset = 0
-
-        while offset < total_chunks:
-            batch = col.get(include=["metadatas"], limit=batch_size, offset=offset)
-            for meta in (batch.get("metadatas") or []):
-                src_name = metadata_source_name(meta)
-                if src_name not in sources:
-                    sources[src_name] = {"chunks": 0, "pages": set()}
-                sources[src_name]["chunks"] += 1
-                sources[src_name]["pages"].add((meta or {}).get("page", 0))
-            offset += batch_size
-
-        estimated_mb = round(total_chunks * CHUNK_SIZE_ESTIMATE / (1024 * 1024), 2)
-        docs_detail = [
-            {"name": src, "chunks": value["chunks"], "pages": len(value["pages"])}
-            for src, value in sorted(sources.items())
-        ]
-
-        return {
-            "total_chunks": total_chunks,
-            "total_documents": len(sources),
-            "estimated_size_mb": estimated_mb,
-            "documents": docs_detail,
-        }
-    except Exception as exc:
-        return {
-            "total_chunks": 0,
-            "total_documents": 0,
-            "estimated_size_mb": 0,
-            "documents": [],
-            "error": str(exc),
-        }
+    return DeleteAllResponse(
+        chunks_deleted=docs_deleted + cfg_deleted,
+        collections_cleared=[DOCS_COLLECTION, CONFIG_COLLECTION],
+    )
 
 
 @app.delete("/document/{doc_name}")
-async def delete_document(doc_name: str, x_admin_token: str | None = Header(default=None)):
-    require_admin_token(x_admin_token)
+def delete_document(doc_name: str, x_admin_token: str | None = Header(default=None)) -> dict:
+    """Elimina tutti i chunk di un singolo documento dalla collection docs."""
+    if ADMIN_TOKEN and x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Admin token non valido.")
+
+    collection = get_collection(DOCS_COLLECTION)
+    raw = collection.get(include=["metadatas"])
+    ids = raw.get("ids", []) or []
+    metas = raw.get("metadatas", []) or []
+
+    to_delete = []
+    for chunk_id, meta in zip(ids, metas):
+        meta = meta or {}
+        if meta.get("source") == doc_name:
+            to_delete.append(chunk_id)
+
+    if not to_delete:
+        raise HTTPException(status_code=404, detail="Documento non trovato.")
+
+    collection.delete(ids=to_delete)
+    return {"status": "ok", "document": doc_name, "chunks_deleted": len(to_delete)}
+
+@app.delete("/admin/reset-documents-index")
+def reset_documents_index(
+    x_admin_token: str | None = Header(default=None),
+) -> dict:
+    """
+    Reset pulito della collection documentale.
+    """
+    if ADMIN_TOKEN and x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Admin token non valido.")
+
     try:
-        col = get_collection()
-        results = col.get(include=["metadatas"])
-        ids_to_delete = [
-            id_
-            for id_, meta in zip(results.get("ids", []), results.get("metadatas", []))
-            if metadata_source_name(meta) == doc_name
-        ]
-
-        if not ids_to_delete:
-            raise HTTPException(404, f"Documento '{doc_name}' non trovato nel DB")
-
-        col.delete(ids=ids_to_delete)
-        return {
-            "status": "ok",
-            "message": f"Documento '{doc_name}' eliminato",
-            "chunks_deleted": len(ids_to_delete),
-        }
-    except HTTPException:
-        raise
+        return reset_collection(DOCS_COLLECTION)
     except Exception as exc:
-        raise HTTPException(500, str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Errore reset collection '{DOCS_COLLECTION}': {exc}",
+        ) from exc
 
+@app.delete("/admin/reset-ha-config-index")
+def reset_ha_config_index(
+    x_admin_token: str | None = Header(default=None),
+) -> dict:
+    """
+    Reset pulito della sola collection di configurazione HA.
+    """
+    if ADMIN_TOKEN and x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Admin token non valido.")
 
-@app.delete("/documents/all")
-async def delete_all_documents(x_admin_token: str | None = Header(default=None)):
-    require_admin_token(x_admin_token)
     try:
-        col = get_collection()
-        total = col.count()
-        host, port = parse_host(CHROMA_HOST)
-        client = chromadb.HttpClient(host=host, port=port)
-        embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=EMBED_MODEL
-        )
-        client.delete_collection(COLLECTION)
-        client.create_collection(
-            name=COLLECTION,
-            embedding_function=embed_fn,
-            metadata={"hnsw:space": "cosine"},
-        )
-        return {"status": "ok", "chunks_deleted": total}
+        return reset_collection(CONFIG_COLLECTION)
     except Exception as exc:
-        raise HTTPException(500, str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Errore reset collection '{CONFIG_COLLECTION}': {exc}",
+        ) from exc
+
+@app.post("/admin/reindex-ha-config")
+def reindex_ha_config(
+    request: ReindexRequest,
+    x_admin_token: str | None = Header(default=None),
+) -> dict:
+    """Lancia l'indicizzazione della cartella config di HA."""
+    if ADMIN_TOKEN and x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Admin token non valido.")
+
+    if _ingest_ha_config is None:
+        raise HTTPException(status_code=501, detail="Modulo ingest_ha_config non disponibile.")
+
+    result = _ingest_ha_config(
+        config_root=request.config_root,
+        collection_name=request.collection_name,
+        chroma_host=CHROMA_HOST,
+        embed_model=EMBED_MODEL,
+    )
+    return result

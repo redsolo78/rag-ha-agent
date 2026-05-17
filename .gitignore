@@ -1,11 +1,6 @@
 .env
-*.pyc
 __pycache__/
-data/
-backend/chroma_db/
-*.log
-*.db
-*.sqlite
-*.pdf
+*.pyc
+*.pyo
+*.egg-info/
 .DS_Store
-scripts/

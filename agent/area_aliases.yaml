@@ -1,0 +1,56 @@
+sala_1:
+  - sala_1
+  - sala 1
+
+sala_2:
+  - sala_2
+  - sala 2
+
+sala_3:
+  - sala_3
+  - sala 3
+
+bagno_su:
+  - bagno_su
+  - bagno su
+  - bagno superiore
+
+bagno_giu:
+  - bagno_giu
+  - bagno giu
+  - bagno giù
+  - bagno inferiore
+
+anticamera_su:
+  - anticamera_su
+  - anticamera su
+
+piano_terra:
+  - piano_terra
+  - piano terra
+  - terra
+
+piano_su:
+  - piano_su
+  - piano su
+
+piano_giu:
+  - piano_giu
+  - piano giu
+  - piano giù
+
+camera_letto:
+  - camera_letto
+  - camera letto
+  - camera da letto
+
+esterno_ingresso:
+  - esterno_ingresso
+  - esterno ingresso
+  - ingresso esterno
+
+cucina:
+  - cucina
+
+salotto:
+  - salotto
