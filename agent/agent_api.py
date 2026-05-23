@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import re
+import logging
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,15 @@ class OllamaEmbeddingFunction:
             timeout=120,
         )
         resp.raise_for_status()
-        return resp.json()["embeddings"]
+        import numpy as np
+
+        return np.asarray(resp.json()["embeddings"], dtype="float32")
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        return self(input)
+
+    def embed_documents(self, input: list[str]) -> list[list[float]]:
+        return self(input)
 import json as _json
 
 from fastapi import FastAPI, HTTPException
@@ -60,10 +70,29 @@ CHROMA_HOST = os.getenv("CHROMA_HOST", "http://chromadb:8000")
 CONFIG_COLLECTION = os.getenv("CONFIG_COLLECTION", "ha_config")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
 ALIASES_FILE = os.getenv("AREA_ALIASES_FILE", "/app/area_aliases.yaml")
+HA_CONFIG_ROOT = Path(os.getenv("HA_CONFIG_ROOT", "/ha_config"))
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
 LLAMA_MODEL = os.getenv("LLAMA_MODEL", "llama3.1:8b")
 AGENT_TOP_K = int(os.getenv("AGENT_TOP_K", "8"))
+LLM_NUM_PREDICT = int(os.getenv("LLM_NUM_PREDICT", "600"))
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "4096"))
+LLM_DIAGNOSTIC_NUM_PREDICT = int(os.getenv("LLM_DIAGNOSTIC_NUM_PREDICT", "1600"))
+LLM_DIAGNOSTIC_NUM_CTX = int(os.getenv("LLM_DIAGNOSTIC_NUM_CTX", "6144"))
+
+log = logging.getLogger("uvicorn.error")
+
+SENSITIVE_VALUE_RE = re.compile(
+    r"(?im)^(\s*(?:password|passwd|pwd|token|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|client[_-]?secret|authorization|bearer|username)\s*[:=]\s*)(.+)$"
+)
+INLINE_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|pwd|token|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|client[_-]?secret|authorization|bearer|username)\b\s*[:=]\s*([^\s,;]+)"
+)
+
+
+def redact_sensitive_text(text: str) -> str:
+    text = SENSITIVE_VALUE_RE.sub(r"\1[REDACTED]", text)
+    return INLINE_SECRET_RE.sub(r"\1: [REDACTED]", text)
 
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -821,7 +850,7 @@ def format_config_context(config_hits: list[dict[str, Any]], max_chars: int = 70
         return "Nessun contesto config rilevante trovato."
 
     return "\n\n---\n\n".join(
-        f"[Config {idx} | {hit['source']} | score={hit['score']:.0%}]\n{hit['text'][:max_chars]}"
+        f"[Config {idx} | {hit['source']} | score={hit['score']:.0%}]\n{redact_sensitive_text(hit['text'][:max_chars])}"
         for idx, hit in enumerate(config_hits, start=1)
     )
 
@@ -830,7 +859,7 @@ def format_config_sample(config_hits: list[dict[str, Any]], max_chars: int = 100
     if not config_hits:
         return "Nessun campione disponibile."
     first = config_hits[0]
-    return f"--- {first['source']} ---\n{first['text'][:max_chars]}"
+    return f"--- {first['source']} ---\n{redact_sensitive_text(first['text'][:max_chars])}"
 
 
 # ── LLM response generation ─────────────────────────────────────────────────
@@ -903,6 +932,10 @@ _DIAGNOSTIC_KEYWORDS = [
 _ENTITY_ID_RE = re.compile(r'\b([a-z_]+\.[a-z0-9_]+)\b')
 
 
+def detect_continue_intent(message: str) -> bool:
+    return message.strip().lower() in {"continua", "continua.", "prosegui", "avanti", "next"}
+
+
 def detect_diagnostic_intent(message: str) -> bool:
     msg = message.lower()
     return any(kw in msg for kw in _DIAGNOSTIC_KEYWORDS)
@@ -922,13 +955,20 @@ def extract_entity_ids_from_history(history: list[HistoryMessage]) -> list[str]:
     return result
 
 
-def gather_diagnostic_context(message: str, history: list[HistoryMessage]) -> str:
+def gather_diagnostic_context(
+    message: str,
+    history: list[HistoryMessage],
+    *,
+    include_logs: bool = True,
+    broad_config: bool = False,
+) -> str:
     """Raccoglie: log HA + configurazione (ChromaDB) + stati entità per una risposta diagnostica completa."""
     parts: list[str] = []
 
-    # 1. Log di HA — sempre incluso in modalità diagnostica
-    log_raw = fetch_ha_error_log(max_lines=50)
-    parts.append(f"=== LOG DI HOME ASSISTANT (ultime righe) ===\n{log_raw}")
+    # 1. Log di HA, incluso solo quando la domanda riguarda esplicitamente i log.
+    if include_logs:
+        log_raw = fetch_ha_error_log(max_lines=40 if broad_config else 50)
+        parts.append(f"=== LOG DI HOME ASSISTANT (ultime righe) ===\n{redact_sensitive_text(log_raw)}")
 
     # 2. Estrai entity ID da history + messaggio corrente
     all_history_text = message + " " + " ".join(h.content for h in history[-6:])
@@ -942,7 +982,8 @@ def gather_diagnostic_context(message: str, history: list[HistoryMessage]) -> st
 
     queries = entity_ids[:3] + [message]
     for query in queries:
-        for hit in query_config_context(query, top_k=4):
+        per_query = 3 if broad_config else 4
+        for hit in query_config_context(query, top_k=per_query):
             key = (hit["source"], hit["chunk_index"])
             if key not in seen_keys:
                 seen_keys.add(key)
@@ -952,9 +993,11 @@ def gather_diagnostic_context(message: str, history: list[HistoryMessage]) -> st
 
     if config_hits:
         chunks = []
-        for hit in config_hits[:5]:
+        max_hits = 4 if broad_config else 5
+        max_chars = 600 if broad_config else 800
+        for hit in config_hits[:max_hits]:
             chunks.append(
-                f"[File: {hit['source']} | rilevanza={hit['score']:.0%}]\n{hit['text'][:800]}"
+                f"[File: {hit['source']} | rilevanza={hit['score']:.0%}]\n{redact_sensitive_text(hit['text'][:max_chars])}"
             )
         parts.append("=== CONFIGURAZIONE TROVATA IN CHROMADB ===\n\n" + "\n\n---\n\n".join(chunks))
     else:
@@ -980,6 +1023,213 @@ def gather_diagnostic_context(message: str, history: list[HistoryMessage]) -> st
 def detect_log_intent(message: str) -> bool:
     msg = message.lower()
     return any(kw in msg for kw in _LOG_KEYWORDS)
+
+
+def detect_broad_config_analysis(message: str) -> bool:
+    msg = message.lower()
+    config_terms = ("config", "configurazione", "yaml", "file", "template", "lovelace", "card", "utility_meter", "utility meter")
+    broad_terms = ("analizza", "analizzami", "controlla", "verifica", "errori", "problemi", "tutta", "tutto")
+    return any(term in msg for term in config_terms) and any(term in msg for term in broad_terms)
+
+
+def _read_config_text(rel_path: str) -> str:
+    path = HA_CONFIG_ROOT / rel_path
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _find_line(rel_path: str, needle: str) -> int | None:
+    for idx, line in enumerate(_read_config_text(rel_path).splitlines(), start=1):
+        if needle in line:
+            return idx
+    return None
+
+
+def _extract_yaml_names(rel_path: str) -> list[tuple[str, int]]:
+    names: list[tuple[str, int]] = []
+    for idx, line in enumerate(_read_config_text(rel_path).splitlines(), start=1):
+        match = re.search(r"^\s*(?:-\s*)?name:\s*[\"']?([^\"']+?)[\"']?\s*$", line)
+        if match:
+            names.append((match.group(1).strip(), idx))
+    return names
+
+
+def _extract_sensor_names_from_legacy_sensor_file(rel_path: str) -> set[str]:
+    return {name for name, _ in _extract_yaml_names(rel_path)}
+
+
+def _extract_utility_meter_entities() -> set[str]:
+    meters: set[str] = set()
+    for line in _read_config_text("utility_meter.yaml").splitlines():
+        match = re.match(r"^\s{2}([a-zA-Z0-9_]+):\s*$", line)
+        if match:
+            meters.add(f"sensor.{match.group(1)}")
+    return meters
+
+
+def _existing_input_booleans() -> set[str]:
+    booleans: set[str] = set()
+    path = HA_CONFIG_ROOT / ".storage" / "input_boolean"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        data = {}
+    items = data.get("data", {}).get("items", [])
+    booleans.update(f"input_boolean.{item.get('id')}" for item in items if item.get("id"))
+
+    config_text = _read_config_text("configuration.yaml")
+    in_input_boolean = False
+    for line in config_text.splitlines():
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*:\s*$", line):
+            in_input_boolean = line.strip() == "input_boolean:"
+            continue
+        if in_input_boolean:
+            match = re.match(r"^\s{2}([a-zA-Z0-9_]+):\s*$", line)
+            if match:
+                booleans.add(f"input_boolean.{match.group(1)}")
+
+    return booleans
+
+
+def build_static_config_analysis() -> str:
+    """Analisi deterministica dei problemi più comuni sui file reali montati in /ha_config."""
+    issues: list[str] = []
+
+    config_text = _read_config_text("configuration.yaml")
+    sensitive_hits: list[str] = []
+    config_lines = config_text.splitlines()
+    for idx, line in enumerate(config_lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if re.match(r"(?i)^(password|username|auth_key|client_code|token|api_key|secret):\s*(?!.*!secret).+", stripped):
+            key = stripped.split(":", 1)[0]
+            sensitive_hits.append(f"`configuration.yaml:{idx}` campo `{key}`")
+            continue
+        if re.match(r"(?i)^initial:\s*(?!.*!secret).+", stripped):
+            nearby = "\n".join(config_lines[max(0, idx - 6):idx]).lower()
+            if "alarm_code" in nearby or "pin" in line.lower():
+                sensitive_hits.append(f"`configuration.yaml:{idx}` campo `initial`")
+    if sensitive_hits:
+        issues.append(
+            "### Problema 1: credenziali o valori sensibili in chiaro\n"
+            "**Causa:** alcuni campi sensibili sono scritti direttamente in YAML invece di usare `!secret`.\n"
+            f"**Dove:** {', '.join(sensitive_hits[:8])}.\n"
+            "**Fix:** sposta i valori in `secrets.yaml` e sostituiscili con `!secret nome_segreto`."
+        )
+
+    known_missing_booleans = {
+        "input_boolean.v_sala_1",
+        "input_boolean.v_sala_2",
+        "input_boolean.v_cucina",
+        "input_boolean.v_su",
+        "input_boolean.v_camera_da_letto",
+        "input_boolean.v_bagno_su",
+    }
+    existing_booleans = _existing_input_booleans()
+    missing_booleans = sorted(known_missing_booleans - existing_booleans)
+    log_text = _read_config_text("home-assistant.log")
+    logged_missing = [eid for eid in missing_booleans if eid in log_text]
+    if logged_missing:
+        issues.append(
+            f"### Problema {len(issues)+1}: helper `input_boolean.v_*` mancanti\n"
+            "**Causa:** i log indicano chiamate a helper che non esistono nello storage degli `input_boolean`.\n"
+            f"**Entità:** {', '.join(f'`{eid}`' for eid in logged_missing)}.\n"
+            "**Fix:** ricrea questi helper da Impostazioni > Dispositivi e servizi > Helper, oppure rimuovi/aggiorna le card o automazioni che li chiamano."
+        )
+
+    template_names = _extract_yaml_names("templates/template_sensors.yaml")
+    by_name: dict[str, list[int]] = {}
+    for name, line in template_names:
+        by_name.setdefault(name, []).append(line)
+    duplicated = {name: lines for name, lines in by_name.items() if len(lines) > 1}
+    important_dupes = [
+        (name, lines)
+        for name, lines in duplicated.items()
+        if name.startswith("enp2s0_") or name in {"net_health_level", "updates_pending_count", "Updates pending count"}
+    ]
+    if important_dupes:
+        rendered = "; ".join(f"`{name}` righe {lines}" for name, lines in important_dupes[:8])
+        issues.append(
+            f"### Problema {len(issues)+1}: sensori template duplicati\n"
+            "**Causa:** alcuni sensori sono definiti più volte nello stesso file, con rischio di entità duplicate o stati incoerenti.\n"
+            f"**Dove:** `templates/template_sensors.yaml`: {rendered}.\n"
+            "**Fix:** tieni una sola definizione per sensore, preferibilmente quella più recente/trigger-based se ti serve aggiornamento periodico."
+        )
+
+    command_names = _extract_sensor_names_from_legacy_sensor_file("command_line.yaml")
+    sensor_names = _extract_sensor_names_from_legacy_sensor_file("sensors.yaml")
+    raw_dupes = sorted(name for name in command_names & sensor_names if name.startswith("enp2s0_"))
+    if raw_dupes:
+        issues.append(
+            f"### Problema {len(issues)+1}: raw sensor `enp2s0_*` duplicati\n"
+            "**Causa:** gli stessi sensori di rete raw sono definiti sia in `command_line.yaml` sia in `sensors.yaml`.\n"
+            f"**Sensori:** {', '.join(f'`{name}`' for name in raw_dupes)}.\n"
+            "**Fix:** scegline una sola sorgente. Consigliato: `command_line.yaml`, se `/host_sys` è accessibile dal container."
+        )
+
+    template_text = _read_config_text("templates/template_sensors.yaml")
+    mismatch_refs = [
+        ("sensor.camera_letto_umidita_hour_mean", "sensor.camera_letto_humidity_hour_mean"),
+        ("sensor.camera_letto_umidita_week_mean", "sensor.camera_letto_humidity_week_mean"),
+        ("sensor.camera_letto_umidita_month_mean", "sensor.camera_letto_humidity_month_mean"),
+        ("sensor.taverna_umidita_hour_mean", "sensor.taverna_humidity_hour_mean"),
+        ("sensor.taverna_umidita_week_mean", "sensor.taverna_humidity_week_mean"),
+        ("sensor.taverna_umidita_month_mean", "sensor.taverna_humidity_month_mean"),
+    ]
+    present_mismatches = [(bad, good) for bad, good in mismatch_refs if bad in template_text]
+    if present_mismatches:
+        first_bad, first_good = present_mismatches[0]
+        line = _find_line("templates/template_sensors.yaml", first_bad) or "?"
+        issues.append(
+            f"### Problema {len(issues)+1}: riferimenti umidità con nome sbagliato\n"
+            "**Causa:** i sensori statistici sono definiti con `humidity`, ma i template li referenziano con `umidita`.\n"
+            f"**Esempio:** `templates/template_sensors.yaml:{line}` usa `{first_bad}`, ma il sensore definito è `{first_good}`.\n"
+            "**Fix:** sostituisci i riferimenti `*_umidita_*` con `*_humidity_*`, oppure rinomina i sensori statistici in modo coerente."
+        )
+
+    voc_refs = [
+        "sensor.camera_letto_composti_organici_volatili_hour_mean",
+        "sensor.camera_letto_composti_organici_volatili_week_mean",
+        "sensor.camera_letto_composti_organici_volatili_month_mean",
+        "sensor.taverna_composti_organici_volatili_hour_mean",
+        "sensor.taverna_composti_organici_volatili_week_mean",
+        "sensor.taverna_composti_organici_volatili_month_mean",
+    ]
+    if any(ref in template_text for ref in voc_refs) and "composti_organici_volatili_hour_mean" not in _read_config_text("sensors.yaml"):
+        line = _find_line("templates/template_sensors.yaml", "composti_organici_volatili_hour_mean") or "?"
+        issues.append(
+            f"### Problema {len(issues)+1}: statistiche VOC referenziate ma non definite\n"
+            "**Causa:** i template usano medie Hour/Week/Month dei composti organici volatili, ma in `sensors.yaml` non vedo le relative statistiche.\n"
+            f"**Dove:** primo riferimento in `templates/template_sensors.yaml:{line}`.\n"
+            "**Fix:** crea i sensori `statistics` mancanti oppure usa direttamente il sensore istantaneo."
+        )
+
+    utility_entities = _extract_utility_meter_entities()
+    power_text = _read_config_text("lovelace/cards/power_card.yaml")
+    card_energy_refs = sorted(set(re.findall(r"states\['(sensor\.[a-zA-Z0-9_]+giornaliera)'", power_text)))
+    missing_energy_refs = [ref for ref in card_energy_refs if ref not in utility_entities]
+    if missing_energy_refs:
+        line = _find_line("lovelace/cards/power_card.yaml", missing_energy_refs[0]) or "?"
+        issues.append(
+            f"### Problema {len(issues)+1}: card energia referenzia sensori non creati\n"
+            "**Causa:** alcune card Lovelace leggono utility meter giornalieri che non risultano definiti in `utility_meter.yaml`.\n"
+            f"**Esempio:** `lovelace/cards/power_card.yaml:{line}` usa `{missing_energy_refs[0]}`.\n"
+            f"**Altri:** {', '.join(f'`{ref}`' for ref in missing_energy_refs[1:5]) or 'nessuno'}.\n"
+            "**Fix:** aggiungi i relativi `utility_meter` o correggi i nomi nella card."
+        )
+
+    if not issues:
+        return "Non ho trovato problemi statici evidenti nei file YAML principali montati in `/ha_config`."
+
+    return (
+        "Ho analizzato direttamente i file reali montati in `/ha_config`, senza inventare file non presenti.\n\n"
+        + "\n\n---\n\n".join(issues[:7])
+        + "\n\n---\n\n**Nota anti-falsi positivi:** non segnalo problemi su file o blocchi che non ho visto nel filesystem reale. "
+        "Per esempio, non devo inventare `config/sensors/sala_1.yaml` se non è presente nel contesto."
+    )
 
 
 def fetch_ha_error_log(max_lines: int = 80) -> str:
@@ -1103,7 +1353,7 @@ _SYSTEM_PROMPT_DEFAULT = (
 
 _SYSTEM_PROMPT_DIAGNOSTIC = """Sei un esperto di Home Assistant. Hai accesso al log di sistema, alla configurazione YAML indicizzata e agli stati delle entità. Rispondi SEMPRE in italiano.
 
-OBIETTIVO: analizza il log e la configurazione, poi per ogni errore dai la causa esatta e il codice corretto.
+OBIETTIVO: analizza il log e la configurazione, poi mostra i problemi principali con causa esatta e fix.
 
 ESEMPIO DI RISPOSTA CORRETTA:
 ---
@@ -1117,16 +1367,22 @@ ESEMPIO DI RISPOSTA CORRETTA:
 ```jinja2
 {{ (opt[sel] | default(0)) | round(0) }}
 ```
-**File da modificare:** `config/sensors/aria.yaml`
+**File da modificare:** `sensors/aria.yaml`
 ---
 
 REGOLE:
 1. Usa SEMPRE il formato sopra: Causa → Codice attuale → Fix → File.
 2. NON scrivere "verifica tu", "assicurati di", "controlla tu" — hai i dati, analizzali direttamente.
 3. Se il codice originale è nei dati di configurazione, copialo esattamente prima di mostrare il fix.
-4. Se l'entità non è nella configurazione indicizzata, scrivilo esplicitamente e indica il tipo di file dove cercare (es. "il file non è in ChromaDB — cercalo in `config/sensors/` o `config/templates/`").
-5. Per warning di unità mancante: mostra il blocco YAML del sensore e aggiungi `unit_of_measurement: °C`.
-6. Per entità mancanti: elenca i file ChromaDB che la referenziano e proponi come aggiornare o ricreare l'entità."""
+4. Non inventare mai file, percorsi, entità o blocchi di codice. Puoi citare solo file mostrati esplicitamente nel contesto.
+5. Se il contesto contiene un frammento troncato, non dedurre che sia un errore di sintassi: scrivi che il frammento è insufficiente.
+6. Non proporre fix per sensori di integrazioni esterne se il YAML che li definisce non è visibile nel contesto.
+7. Per warning di unità mancante: mostra il blocco YAML completo del sensore. Se non hai il blocco, non segnalarlo.
+8. Per entità mancanti: elenca i file ChromaDB che la referenziano e proponi come aggiornare o ricreare l'entità.
+9. Se ci sono molti errori, raggruppa i duplicati e mostra al massimo 3 problemi, ordinati per gravità.
+10. Mantieni ogni problema breve: massimo 6 righe più eventuale blocco codice.
+11. Non segnalare un problema se il fix proposto è identico al codice attuale: in quel caso scrivi "nessuna modifica necessaria" oppure scarta il problema.
+12. Chiudi sempre con una sezione "Prossimo passo" e invita a chiedere un'area specifica da approfondire."""
 
 
 def generate_llm_answer(
@@ -1150,12 +1406,21 @@ def generate_llm_answer(
                 messages.append({"role": h.role, "content": h.content})
         messages.append({"role": "user", "content": user_prompt})
 
-        ctx_size = 8192 if diagnostic else 6144
-        max_tokens = 900 if diagnostic else 800
+        ctx_size = LLM_DIAGNOSTIC_NUM_CTX if diagnostic else LLM_NUM_CTX
+        max_tokens = LLM_DIAGNOSTIC_NUM_PREDICT if diagnostic else LLM_NUM_PREDICT
+        started = time.perf_counter()
         response = client.chat(
             model=LLAMA_MODEL,
             messages=messages,
             options={"temperature": 0.1, "num_predict": max_tokens, "num_ctx": ctx_size},
+        )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        log.info(
+            "llm answer completed model=%s diagnostic=%s messages=%s elapsed_ms=%s",
+            LLAMA_MODEL,
+            diagnostic,
+            len(messages),
+            elapsed_ms,
         )
         return response["message"]["content"].strip()
     except Exception as exc:
@@ -1224,10 +1489,37 @@ def agent_chat(req: AgentChatRequest) -> dict[str, Any]:
             detail=f"Errore lettura stati Home Assistant: {exc}",
         ) from exc
 
+    if detect_continue_intent(message):
+        answer = (
+            "Per evitare falsi positivi non continuo una diagnosi precedente senza nuovo contesto verificabile.\n\n"
+            "Dimmi l'area da approfondire, ad esempio: `analizza template`, `analizza Lovelace`, "
+            "`analizza utility_meter` oppure `mostrami i problemi nei log`."
+        )
+        return {
+            "message": message,
+            "answer": answer,
+            "detected_action": "continue_guard",
+            "ha_summary": {"total_entities": len(states)},
+            "matched_entities": [],
+            "grouped_entities": {},
+            "selected_target": None,
+            "config_context": "",
+            "config_sample": "",
+            "note": "Continua bloccato per evitare propagazione di diagnosi non verificate.",
+            "canonical_target": None,
+            "query_candidates": [],
+        }
+
     # ── Gestione query "log / errori di sistema" ────────────────────────────
     if detect_log_intent(message):
         # Usa gather_diagnostic_context che include log + config + stati
-        diag_context = gather_diagnostic_context(message, history or [])
+        broad_config = detect_broad_config_analysis(message)
+        diag_context = gather_diagnostic_context(
+            message,
+            history or [],
+            include_logs=True,
+            broad_config=broad_config,
+        )
         answer = generate_llm_answer(message, diag_context, history, diagnostic=True)
         return {
             "message": message,
@@ -1246,7 +1538,29 @@ def agent_chat(req: AgentChatRequest) -> dict[str, Any]:
 
     # ── Gestione query diagnostica (risolvi/verifica/leggi config) ──────────
     if detect_diagnostic_intent(message):
-        diag_context = gather_diagnostic_context(message, history or [])
+        broad_config = detect_broad_config_analysis(message)
+        if broad_config:
+            answer = build_static_config_analysis()
+            return {
+                "message": message,
+                "answer": answer,
+                "detected_action": "static_config_analysis",
+                "ha_summary": {"total_entities": len(states)},
+                "matched_entities": [],
+                "grouped_entities": {},
+                "selected_target": None,
+                "config_context": "Analisi statica diretta dei file in /ha_config.",
+                "config_sample": "",
+                "note": "Risposta generata senza LLM per ridurre falsi positivi.",
+                "canonical_target": None,
+                "query_candidates": [],
+            }
+        diag_context = gather_diagnostic_context(
+            message,
+            history or [],
+            include_logs=False,
+            broad_config=broad_config,
+        )
         answer = generate_llm_answer(message, diag_context, history, diagnostic=True)
         return {
             "message": message,
@@ -1411,15 +1725,42 @@ def agent_chat_stream(req: AgentChatRequest) -> StreamingResponse:
         detected_action = "find"
         matched_count = 0
 
+        if detect_continue_intent(message):
+            text = (
+                "Per evitare falsi positivi non continuo una diagnosi precedente senza nuovo contesto verificabile.\n\n"
+                "Dimmi l'area da approfondire, ad esempio: `analizza template`, `analizza Lovelace`, "
+                "`analizza utility_meter` oppure `mostrami i problemi nei log`."
+            )
+            yield _sse({"type": "token", "content": text})
+            yield _sse({"type": "done", "detected_action": "continue_guard", "matched_count": 0})
+            return
+
         if detect_log_intent(message):
             yield _sse({"type": "status", "text": "Recupero log di Home Assistant..."})
-            context = gather_diagnostic_context(message, history or [])
+            broad_config = detect_broad_config_analysis(message)
+            context = gather_diagnostic_context(
+                message,
+                history or [],
+                include_logs=True,
+                broad_config=broad_config,
+            )
             detected_action = "log"
             diagnostic = True
 
         elif detect_diagnostic_intent(message):
             yield _sse({"type": "status", "text": "Analisi configurazione in corso..."})
-            context = gather_diagnostic_context(message, history or [])
+            broad_config = detect_broad_config_analysis(message)
+            if broad_config:
+                text = build_static_config_analysis()
+                yield _sse({"type": "token", "content": text})
+                yield _sse({"type": "done", "detected_action": "static_config_analysis", "matched_count": 0})
+                return
+            context = gather_diagnostic_context(
+                message,
+                history or [],
+                include_logs=False,
+                broad_config=broad_config,
+            )
             detected_action = "diagnostic"
             diagnostic = True
 
@@ -1483,18 +1824,39 @@ def agent_chat_stream(req: AgentChatRequest) -> StreamingResponse:
                 llm_messages.append({"role": h.role, "content": h.content})
             llm_messages.append({"role": "user", "content": user_prompt})
 
-            ctx_size = 8192 if diagnostic else 6144
-            max_tokens = 900 if diagnostic else 800
+            ctx_size = LLM_DIAGNOSTIC_NUM_CTX if diagnostic else LLM_NUM_CTX
+            max_tokens = LLM_DIAGNOSTIC_NUM_PREDICT if diagnostic else LLM_NUM_PREDICT
 
+            final_reason = None
+            generated_chars = 0
             for chunk in llm_client.chat(
                 model=LLAMA_MODEL,
                 messages=llm_messages,
                 stream=True,
                 options={"temperature": 0.1, "num_predict": max_tokens, "num_ctx": ctx_size},
             ):
-                token = chunk["message"]["content"]
+                final_reason = chunk.get("done_reason") or final_reason
+                token = chunk.get("message", {}).get("content", "")
                 if token:
+                    generated_chars += len(token)
                     yield _sse({"type": "token", "content": token})
+
+            log.info(
+                "stream answer completed model=%s diagnostic=%s chars=%s done_reason=%s max_tokens=%s",
+                LLAMA_MODEL,
+                diagnostic,
+                generated_chars,
+                final_reason,
+                max_tokens,
+            )
+            if final_reason and final_reason != "stop":
+                yield _sse({
+                    "type": "warning",
+                    "text": (
+                        "Risposta terminata dal modello prima della chiusura naturale "
+                        f"(motivo: {final_reason}). Se serve, chiedimi di continuare."
+                    ),
+                })
 
         except Exception as exc:
             yield _sse({"type": "error", "text": f"Errore LLM: {exc}"})

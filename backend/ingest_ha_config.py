@@ -36,7 +36,15 @@ class OllamaEmbeddingFunction:
             timeout=120,
         )
         resp.raise_for_status()
-        return resp.json()["embeddings"]
+        import numpy as np
+
+        return np.asarray(resp.json()["embeddings"], dtype="float32")
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        return self(input)
+
+    def embed_documents(self, input: list[str]) -> list[list[float]]:
+        return self(input)
 
 
 # ── Config generale ─────────────────────────────────────────────────────────

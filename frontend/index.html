@@ -1241,10 +1241,13 @@ Appena pronto potrai fare le tue domande sui documenti caricati.</div>
             const msgs = document.getElementById("agent-messages");
             msgs.scrollTop = msgs.scrollHeight;
 
-          } else if (evt.type === "error") {
-            throw new Error(evt.text);
+	          } else if (evt.type === "error") {
+	            throw new Error(evt.text);
 
-          } else if (evt.type === "done") {
+	          } else if (evt.type === "warning") {
+	            addAgentStep("error", "⚠️ " + evt.text);
+
+	          } else if (evt.type === "done") {
             perf.record((Date.now() - _t0) / 1000);
             if (_fullAnswer) {
               agentHistory.push({ role: "assistant", content: _fullAnswer });

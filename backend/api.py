@@ -16,6 +16,8 @@ Fix aggiuntivi:
 from __future__ import annotations
 
 import os
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -45,7 +47,15 @@ class OllamaEmbeddingFunction:
             timeout=120,
         )
         resp.raise_for_status()
-        return resp.json()["embeddings"]
+        import numpy as np
+
+        return np.asarray(resp.json()["embeddings"], dtype="float32")
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        return self(input)
+
+    def embed_documents(self, input: list[str]) -> list[list[float]]:
+        return self(input)
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -69,6 +79,10 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+LLM_NUM_PREDICT = int(os.getenv("LLM_NUM_PREDICT", "600"))
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "4096"))
+
+log = logging.getLogger("uvicorn.error")
 
 
 def parse_allowed_origins() -> list[str]:
@@ -472,7 +486,9 @@ def chat(req: ChatRequest) -> ChatResponse:
     Se non esistono chunk rilevanti, NON chiama Ollama e restituisce
     una risposta onesta e controllata.
     """
+    started = time.perf_counter()
     hits = retrieve_chunks(req.question, req.top_k)
+    retrieval_ms = int((time.perf_counter() - started) * 1000)
 
     if not hits:
         return ChatResponse(
@@ -491,13 +507,30 @@ def chat(req: ChatRequest) -> ChatResponse:
     prompt = build_prompt(req.question, hits)
 
     try:
+        llm_started = time.perf_counter()
         response = get_ollama().chat(
             model=LLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1, "top_p": 0.9, "num_predict": 2048},
+            options={
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "num_predict": LLM_NUM_PREDICT,
+                "num_ctx": LLM_NUM_CTX,
+            },
         )
+        llm_ms = int((time.perf_counter() - llm_started) * 1000)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Errore Ollama: {exc}") from exc
+
+    total_ms = int((time.perf_counter() - started) * 1000)
+    log.info(
+        "chat completed model=%s hits=%s retrieval_ms=%s llm_ms=%s total_ms=%s",
+        LLAMA_MODEL,
+        len(hits),
+        retrieval_ms,
+        llm_ms,
+        total_ms,
+    )
 
     return ChatResponse(
         answer=response["message"]["content"],
