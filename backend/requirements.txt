@@ -5,4 +5,4 @@ ollama
 python-multipart
 requests
 pyyaml
-rank-bm25>=0.2
+rank-bm25>=0.2.2
