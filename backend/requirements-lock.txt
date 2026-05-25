@@ -48,11 +48,11 @@ orjson==3.11.9
 overrides==7.7.0
 packaging==26.2
 propcache==0.5.2
-protobuf==6.33.6
+protobuf==7.35.0
 pybase64==1.4.3
 pydantic==2.13.4
 pydantic-settings==2.14.1
-pydantic_core==2.46.4
+pydantic_core==2.47.0
 Pygments==2.20.0
 PyPika==0.51.1
 pyproject_hooks==1.2.0
@@ -76,7 +76,7 @@ typer==0.25.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.7.0
-uvicorn==0.47.0
+uvicorn==0.48.0
 uvloop==0.22.1
 watchfiles==1.2.0
 websocket-client==1.9.0
